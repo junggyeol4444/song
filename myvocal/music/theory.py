@@ -967,18 +967,30 @@ class Key:
             root = root.transpose(alteration, prefer_flat=alteration < 0)
 
         suffix = suffix.replace("°", "dim").strip("/")
-        if suffix in CHORD_INTERVALS:
+        minor = roman.islower()
+
+        # 소문자 도수는 단화음을 뜻한다. 그래서 접미사를 코드 종류 표에서 바로
+        # 찾으면 안 된다. 'ii7' 의 '7' 을 도미넌트7로 읽으면 Dm7 이 D7 이 된다.
+        # 소문자에서는 숫자만 붙은 접미사를 단화음 계열로 먼저 해석한다.
+        minor_suffix_map = {
+            "": "m", "7": "m7", "9": "m9", "11": "m11", "13": "m13",
+            "6": "m6", "maj7": "mMaj7", "M7": "mMaj7", "add9": "madd9",
+            "7b5": "m7b5", "b5": "dim", "dim": "dim", "dim7": "dim7",
+        }
+        major_suffix_map = {"": "", "M7": "maj7", "maj7": "maj7"}
+
+        if minor and suffix in minor_suffix_map:
+            kind = minor_suffix_map[suffix]
+        elif not minor and suffix in major_suffix_map:
+            kind = major_suffix_map[suffix]
+        elif suffix in CHORD_INTERVALS:
             kind = suffix
         elif suffix in _SUFFIX_ALIASES:
             kind = _SUFFIX_ALIASES[suffix]
-        elif suffix == "":
-            kind = "m" if roman.islower() else ""
-        elif suffix == "7":
-            kind = "m7" if roman.islower() else "7"
         else:
-            raise TheoryError(f"도수 표기의 접미사를 읽을 수 없습니다: {suffix!r}")
-        if roman.islower() and kind == "":
-            kind = "m"
+            raise TheoryError(
+                f"도수 표기의 접미사를 읽을 수 없습니다: {suffix!r} (전체: {numeral!r})"
+            )
         return Chord(root, kind)
 
     def secondary_dominant(self, target_degree: int) -> Chord:
