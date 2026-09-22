@@ -311,7 +311,7 @@ def compress(buffer: AudioBuffer, settings: CompressorSettings) -> tuple[AudioBu
 
 def limit(
     buffer: AudioBuffer, ceiling_db: float = -0.3, lookahead_ms: float = 5.0,
-    release_ms: float = 50.0
+    release_ms: float = 50.0, true_peak: bool = True, oversample: int = 4,
 ) -> tuple[AudioBuffer, float]:
     """리미터. 지정한 천장을 절대 넘지 않게 한다.
 
@@ -319,27 +319,51 @@ def limit(
 
     룩어헤드를 쓰는 이유: 소리가 온 뒤에 반응하면 첫 순간이 이미 넘어간다.
     신호를 조금 늦추고 이득 곡선을 먼저 내려서 그 순간을 막는다.
+
+    true_peak 를 켜면 샘플 사이에 숨은 피크까지 막는다. 디지털 샘플값이
+    천장 아래여도, 스피커나 변환기가 아날로그로 되돌릴 때 그 사이에서 더
+    올라갈 수 있다. MP3/AAC 로 압축하면 더 심해진다. 방송·스트리밍 규격이
+    보는 값이 이것이라, 끄면 규격을 못 맞춘다.
     """
     if buffer.frames == 0:
         return buffer.copy(), 0.0
+    if oversample < 1:
+        raise AudioError(f"오버샘플 배수는 1 이상이어야 합니다: {oversample}")
     ceiling = db_to_linear(ceiling_db)
     signal = buffer.data.astype(np.float64)
-    detector = np.max(np.abs(signal), axis=0)
+    rate = buffer.sample_rate
 
-    lookahead_frames = max(1, int(round(lookahead_ms * 0.001 * buffer.sample_rate)))
+    if true_peak and oversample > 1:
+        # 샘플 사이를 실제로 복원해서 최대값을 본다
+        upsampled = scipy_signal.resample_poly(signal, oversample, 1, axis=1)
+        detector_fine = np.max(np.abs(upsampled), axis=0)
+        # 오버샘플된 검출값을 원래 해상도로 되돌린다. 각 구간의 최대를 취해야
+        # 사이에 있던 봉우리를 놓치지 않는다.
+        usable = (detector_fine.shape[0] // oversample) * oversample
+        detector = detector_fine[:usable].reshape(-1, oversample).max(axis=1)
+        if detector.shape[0] < signal.shape[1]:
+            detector = np.concatenate([
+                detector, np.zeros(signal.shape[1] - detector.shape[0])
+            ])
+        else:
+            detector = detector[: signal.shape[1]]
+    else:
+        detector = np.max(np.abs(signal), axis=0)
+
+    lookahead_frames = max(1, int(round(lookahead_ms * 0.001 * rate)))
 
     # 앞으로 lookahead 구간의 최대값을 미리 본다
     padded = np.concatenate([detector, np.zeros(lookahead_frames)])
     windowed_max = scipy_signal.order_filter(
         padded, np.ones(2 * lookahead_frames + 1), 2 * lookahead_frames
-    )[:detector.shape[0]] if lookahead_frames > 0 else detector
+    )[: detector.shape[0]]
 
     with np.errstate(divide="ignore", invalid="ignore"):
         needed_gain = np.where(windowed_max > ceiling, ceiling / windowed_max, 1.0)
     needed_gain_db = 20.0 * np.log10(np.maximum(needed_gain, 1e-10))
 
     # 내려갈 때는 즉시, 올라올 때만 release 로 천천히
-    smoothed_db = _smooth_envelope(needed_gain_db, 0.0, release_ms, buffer.sample_rate)
+    smoothed_db = _smooth_envelope(needed_gain_db, 0.0, release_ms, rate)
     smoothed_db = np.minimum(smoothed_db, needed_gain_db)   # 절대 천장을 못 넘게 한다
 
     delayed = np.zeros_like(signal)
@@ -347,9 +371,16 @@ def limit(
         delayed[:, lookahead_frames:] = signal[:, : -lookahead_frames]
     result = delayed * np.power(10.0, smoothed_db / 20.0)
 
-    # 수치 오차로 아주 살짝 넘는 경우를 위한 마지막 안전장치
-    result = np.clip(result, -ceiling, ceiling)
-    return AudioBuffer(result, buffer.sample_rate), float(-np.min(smoothed_db))
+    output = AudioBuffer(result, rate)
+    if true_peak and oversample > 1:
+        # 보간 오차가 남아 아주 살짝 넘는 경우를 위해 한 번 더 확인한다
+        actual = output.true_peak(oversample=oversample)
+        if actual > ceiling and actual > 0:
+            output = output.with_gain(ceiling / actual)
+    else:
+        result = np.clip(result, -ceiling, ceiling)
+        output = AudioBuffer(result, rate)
+    return output, float(-np.min(smoothed_db))
 
 
 def gate(

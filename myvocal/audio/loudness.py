@@ -313,3 +313,125 @@ def normalize_to_lufs(
     if predicted_peak_db > true_peak_ceiling_db:
         gain_db -= predicted_peak_db - true_peak_ceiling_db
     return buffer.with_gain(db_to_linear(gain_db)), gain_db
+
+
+def master_to_lufs(
+    buffer: AudioBuffer,
+    target_lufs: float = -14.0,
+    true_peak_ceiling_db: float = -1.0,
+    max_limiting_db: float = 6.0,
+    passes: int = 3,
+) -> tuple[AudioBuffer, "MasteringResult"]:
+    """목표 라우드니스까지 실제로 끌어올린다.
+
+    normalize_to_lufs 와 다르다. 그쪽은 피크가 천장에 닿으면 이득을 줄여서
+    목표에 못 미친 채로 끝난다. 안전하지만 곡이 다른 곡보다 조용해진다.
+
+    실제 마스터링은 그렇게 하지 않는다. 이득을 올리고, 넘치는 순간만 리미터로
+    눌러서 천장을 지키면서 평균 음량을 올린다. 여기서 그걸 한다.
+
+    라우드니스는 리미팅 뒤에 다시 재야 정확하다. 리미터가 파형을 바꾸기
+    때문이다. 그래서 몇 번 반복해서 목표에 맞춘다.
+
+    max_limiting_db 는 안전장치다. 이보다 많이 눌러야 목표에 닿는다면,
+    그건 곡 자체가 목표보다 훨씬 조용하거나 다이내믹이 큰 것이다. 억지로
+    누르면 소리가 납작해지므로 거기서 멈추고 결과에 알린다.
+    """
+    if passes < 1:
+        raise AudioError(f"반복 횟수는 1 이상이어야 합니다: {passes}")
+    if max_limiting_db < 0:
+        raise AudioError(f"최대 리미팅 양은 0 이상이어야 합니다: {max_limiting_db}")
+
+    from . import dsp
+    from .buffer import db_to_linear
+
+    original = measure(buffer)
+    if original.integrated_lufs == float("-inf"):
+        return buffer.copy(), MasteringResult(
+            applied_gain_db=0.0, limiting_db=0.0, reached_target=False,
+            before=original, after=original,
+            note="무음이라 라우드니스를 맞출 수 없습니다.",
+        )
+
+    working = buffer
+    total_gain = 0.0
+    total_limiting = 0.0
+    note = ""
+
+    for _ in range(passes):
+        current = integrated_loudness(working)
+        remaining = target_lufs - current
+        if abs(remaining) < 0.1:
+            break
+        # 음량을 낮춰야 하면 리미터가 필요 없다. 그냥 낮춘다.
+        if remaining < 0:
+            working = working.with_gain(db_to_linear(remaining))
+            total_gain += remaining
+            continue
+        # 올릴 때는, 천장을 넘는 만큼만 리미터가 누르게 한다.
+        headroom = true_peak_ceiling_db - working.true_peak_db(oversample=4)
+        limiting_needed = max(0.0, remaining - headroom)
+        allowed = min(limiting_needed, max(0.0, max_limiting_db - total_limiting))
+        step = headroom + allowed
+        if step <= 0.0:
+            note = (
+                f"허용한 리미팅 {max_limiting_db:.1f}dB 를 다 썼습니다. "
+                f"목표까지 {target_lufs - current:.1f}dB 남았습니다."
+            )
+            break
+        working = working.with_gain(db_to_linear(step))
+        total_gain += step
+        if allowed > 0:
+            working, reduction = dsp.limit(
+                working, ceiling_db=true_peak_ceiling_db, lookahead_ms=5.0, release_ms=60.0
+            )
+            total_limiting += min(allowed, reduction)
+
+    # 마지막으로 천장을 확실히 지킨다
+    working, final_reduction = dsp.limit(
+        working, ceiling_db=true_peak_ceiling_db, lookahead_ms=5.0, release_ms=60.0
+    )
+    total_limiting += final_reduction
+
+    after = measure(working)
+    reached = abs(after.integrated_lufs - target_lufs) <= 0.5
+    if not reached and not note:
+        note = (
+            f"목표 {target_lufs:.1f} LUFS 에 {after.integrated_lufs - target_lufs:+.1f}dB "
+            f"못 미쳤습니다."
+        )
+    if after.loudness_range_lu < 3.0 and original.loudness_range_lu >= 3.0:
+        note += (
+            f" 다이내믹이 {original.loudness_range_lu:.1f} -> "
+            f"{after.loudness_range_lu:.1f} LU 로 줄었습니다. 과하게 눌렸을 수 있습니다."
+        )
+    return working, MasteringResult(
+        applied_gain_db=total_gain,
+        limiting_db=total_limiting,
+        reached_target=reached,
+        before=original,
+        after=after,
+        note=note.strip(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MasteringResult:
+    """마스터링 결과 보고. 무슨 일이 있었는지 숫자로 남긴다."""
+
+    applied_gain_db: float
+    limiting_db: float
+    reached_target: bool
+    before: LoudnessReport
+    after: LoudnessReport
+    note: str = ""
+
+    def summary(self) -> str:
+        lines = [
+            f"이득 {self.applied_gain_db:+.1f}dB, 리미팅 {self.limiting_db:.1f}dB",
+            f"전: {self.before.summary()}",
+            f"후: {self.after.summary()}",
+        ]
+        if self.note:
+            lines.append(f"참고: {self.note}")
+        return "\n".join(lines)
