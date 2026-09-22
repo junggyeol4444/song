@@ -331,6 +331,67 @@ window.close()
 start.close()
 dialog.close()
 
+print("[13] 가사 편집")
+lyrics = window.lyrics_panel
+lyrics.set_project(project)
+check_true("구간별 입력칸이 만들어진다", len(lyrics._editors) > 0,
+           f"({len(lyrics._editors)}개)")
+check_true("보컬 트랙이 잡힌다", lyrics.track is not None)
+# 음이 넉넉한 칸을 골라야 '모자람' 과 '남음' 을 둘 다 시험할 수 있다
+first = max(lyrics._editors, key=lambda e: len(e.line.notes))
+note_count = len(first.line.notes)
+check_true("음이 넉넉한 입력칸이 있다", note_count >= 4, f"({note_count}개)")
+check_true("모든 입력칸에 음이 있다",
+           all(len(e.line.notes) > 0 for e in lyrics._editors))
+# 음절 수보다 짧게 쓰면 알려준다
+first.editor.setPlainText("다시")
+application.processEvents()
+check("음절 수 표시", first.count_label.text(), f"2 / {note_count}")
+check_true("모자란다고 알려준다", "더 쓸 수 있습니다" in first.hint_label.text(),
+           f"({first.hint_label.text()})")
+# 넘치면 그것도 알려준다
+first.editor.setPlainText("가" * (note_count + 4))
+application.processEvents()
+check_true("남는다고 알려준다", "남습니다" in first.hint_label.text(),
+           f"({first.hint_label.text()})")
+# 실제 발음을 보여준다
+first.editor.setPlainText("같이" + "가" * max(0, note_count - 2))
+application.processEvents()
+check_true("실제 발음을 보여준다", "가치" in first.hint_label.text(),
+           f"({first.hint_label.text()})")
+# 붙이기
+text = "다시만나는날에우리웃으면서손을잡고그날처럼따뜻하게"[:note_count]
+first.editor.setPlainText(text)
+application.processEvents()
+before_undo = len(window.history)
+lyrics.apply_lyrics()
+application.processEvents()
+filled = sum(1 for n in lyrics.track.notes if n.lyric)
+check("가사가 붙는다", filled, len(text))
+check("기록에 남는다", len(window.history), before_undo + 1)
+check_true("설명이 붙는다", "가사" in window.history.undo_description,
+           f"({window.history.undo_description})")
+window.undo()
+check("되돌리면 사라진다", sum(1 for n in lyrics.track.notes if n.lyric), 0)
+window.redo()
+check("다시 실행하면 돌아온다",
+      sum(1 for n in lyrics.track.notes if n.lyric), len(text))
+# 가사가 붙은 음은 실제로 노래로 렌더링된다
+from myvocal.audio.renderer import RenderOptions, Renderer
+
+renderer = Renderer(RenderOptions())
+warnings_out: list[str] = []
+sung = renderer.render_vocal(lyrics.track, project.tempo,
+                             int(project.duration_seconds * 48000), warnings_out)
+check_true("가사가 있으면 노래로 만들어진다", sung is not None)
+if sung is not None:
+    check_true("소리가 난다", sung.peak() > 0.05, f"({sung.peak():.3f})")
+check_true("가사 없는 음은 알려준다",
+           any("가사가 없어" in w for w in warnings_out), f"({warnings_out})")
+window.undo()
+empty_vocal = renderer.render_vocal(lyrics.track, project.tempo, 48000, [])
+check("가사가 하나도 없으면 악기로 연주한다", empty_vocal, None)
+
 print("\n" + "=" * 62)
 print(f"검증 항목 {checks}개")
 if failures:

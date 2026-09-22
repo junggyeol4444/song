@@ -29,6 +29,7 @@ from ..core.units import PPQ
 from ..music.instruments import available_instruments, create_instrument
 from ..music.structure import SECTION_COLORS
 from ..music.theory import Key
+from .lyrics_panel import LyricsPanel
 from .piano_roll import PianoKeyboard, PianoRoll
 from .theme import DARK, Palette, build_stylesheet
 from .timeline import TimelineRuler
@@ -142,9 +143,15 @@ class MainWindow(QtWidgets.QMainWindow):
         center_layout.addWidget(roll_row, 1)
         splitter.addWidget(center)
 
-        # --- 오른쪽: 정보 / AI ---
+        # --- 오른쪽: 정보 / 가사 ---
+        self.side_tabs = QtWidgets.QTabWidget()
+        self.side_tabs.setMinimumWidth(270)
+        self.side_tabs.setMaximumWidth(420)
         self.side_panel = self._build_side_panel()
-        splitter.addWidget(self.side_panel)
+        self.side_tabs.addTab(self.side_panel, "곡")
+        self.lyrics_panel = LyricsPanel(self._palette)
+        self.side_tabs.addTab(self.lyrics_panel, "가사")
+        splitter.addWidget(self.side_tabs)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -271,6 +278,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.track_panel.add_requested.connect(self.add_track)
 
         self.structure_list.itemDoubleClicked.connect(self._on_structure_activated)
+        self.lyrics_panel.lyrics_applied.connect(self._on_lyrics_applied)
+        self.lyrics_panel.note_focused.connect(self._on_seek)
         self.history.add_listener(lambda what: self._refresh_history())
 
     # ---------------------------------------------------------------- 자료
@@ -292,6 +301,7 @@ class MainWindow(QtWidgets.QMainWindow):
             project.meter, project.tempo,
         )
         self._refresh_sections()
+        self.lyrics_panel.set_project(project)
         self.piano_roll.zoom_to_fit(max(1, project.end_tick))
         self._refresh_info()
         self._refresh_history()
@@ -393,6 +403,18 @@ class MainWindow(QtWidgets.QMainWindow):
         elif kind == "edit":
             changes, label = payload
             self._run(H.EditNotes(track, changes, label))
+
+    def _on_lyrics_applied(self, track: Track, changes: list) -> None:
+        """가사 편집 화면에서 온 변경을 기록에 남기며 적용한다."""
+        if not changes:
+            self.status.showMessage("바뀐 가사가 없습니다.", 2500)
+            return
+        self._run(H.EditNotes(track, changes, f"'{track.name}' 가사 입력"))
+        self.lyrics_panel.refresh()
+        filled = sum(1 for _, new in changes if new.lyric)
+        self.status.showMessage(
+            f"가사를 붙였습니다 — 음 {len(changes)}개 수정 (가사 있는 음 {filled}개)", 5000
+        )
 
     def delete_selected(self) -> None:
         notes = self.piano_roll.selected_notes()
