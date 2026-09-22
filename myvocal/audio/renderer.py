@@ -29,9 +29,12 @@ from ..core.notes import Note
 from ..core.project import Project
 from ..core.tracks import Track
 from ..core.units import TempoMap
+from ..music.theory import midi_to_frequency
 from ..music.instruments import (
     DRUM_NOTES, DrumKit, Instrument, InstrumentError, create_instrument,
 )
+from ..voice.phonemes import align_lyrics
+from ..voice.synth import SingingSynth, VoiceError, VoiceTimbre
 from . import dsp, loudness
 from .buffer import AudioBuffer, AudioError, db_to_linear
 
@@ -53,6 +56,7 @@ class RenderOptions:
     tail_seconds: float = 3.0
     velocity_quantize: int = 8       # 세기를 이 단위로 묶어 캐시 적중률을 높인다
     duration_quantize_ms: float = 25.0
+    sing_lyrics: bool = True         # 가사가 있는 보컬 트랙을 실제로 부르게 한다
 
     def __post_init__(self) -> None:
         if self.sample_rate < 8000:
@@ -195,6 +199,61 @@ class Renderer:
 
     # ------------------------------------------------------------------
 
+    def render_vocal(
+        self, track: Track, tempo: TempoMap, total_frames: int,
+        warnings: list[str] | None = None,
+    ) -> AudioBuffer | None:
+        """가사가 붙은 보컬 트랙을 노래로 만든다.
+
+        가사가 없으면 None 을 돌려준다. 그러면 평소대로 악기로 연주한다.
+        가사 없이 노래 합성기를 돌리면 전부 '아' 로 부르게 되는데, 그건
+        코러스 악기와 다를 바 없으면서 소리만 이상해진다.
+        """
+        rate = self.options.sample_rate
+        warnings = warnings if warnings is not None else []
+        notes = [n for n in track.notes if n.lyric]
+        if not notes:
+            return None
+        if len(notes) < len(track.notes):
+            warnings.append(
+                f"'{track.name}': 음 {len(track.notes) - len(notes)}개에 가사가 없어 "
+                f"부르지 않았습니다."
+            )
+
+        preset = track.singing_style or "mezzo"
+        try:
+            timbre = VoiceTimbre.preset(preset)
+        except VoiceError:
+            timbre = VoiceTimbre.preset("mezzo")
+            warnings.append(
+                f"'{track.name}': 모르는 목소리 '{preset}' 이라 기본값으로 불렀습니다."
+            )
+
+        text = "".join(n.lyric for n in notes)
+        note_times = [
+            (tempo.tick_to_seconds(n.start_tick),
+             max(0.05, tempo.tick_to_seconds(n.end_tick) - tempo.tick_to_seconds(n.start_tick)))
+            for n in notes
+        ]
+        pitches = [midi_to_frequency(n.midi) for n in notes]
+        try:
+            syllables = align_lyrics(text, note_times)
+            singing = SingingSynth(timbre, rate).render(syllables, pitches)
+        except Exception as error:
+            warnings.append(f"'{track.name}': 노래로 만들 수 없어 악기로 연주했습니다 ({error})")
+            return None
+
+        # 세기를 반영한다. 노래 합성기는 음높이와 발음만 다루므로 여기서 건다.
+        result = AudioBuffer.silence(total_frames, 1, rate)
+        result.mix_in_place(singing, 0)
+        envelope = np.ones(total_frames)
+        for note, (start, duration) in zip(notes, note_times):
+            begin = max(0, int(start * rate))
+            end = min(total_frames, int((start + duration) * rate))
+            if end > begin:
+                envelope[begin:end] = 0.35 + 0.65 * (note.velocity / 127.0)
+        return AudioBuffer.from_mono(result.data[0] * envelope, rate)
+
     def render_track(
         self, track: Track, tempo: TempoMap, total_frames: int,
         warnings: list[str] | None = None,
@@ -204,6 +263,11 @@ class Renderer:
         buffer = AudioBuffer.silence(total_frames, 1, rate)
         if not track.notes:
             return buffer
+
+        if self.options.sing_lyrics and track.kind == "vocal":
+            sung = self.render_vocal(track, tempo, total_frames, warnings)
+            if sung is not None:
+                return sung
 
         instrument = self._instrument(track.instrument)
         is_drum = isinstance(instrument, DrumKit)
