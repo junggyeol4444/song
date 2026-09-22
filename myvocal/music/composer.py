@@ -118,7 +118,10 @@ def choose_bpm(profile: GenreProfile, generator: random.Random) -> float:
     low, high, typical = profile.bpm_low, profile.bpm_high, profile.bpm_typical
     # 보통값을 중심으로 한 삼각 분포
     value = generator.triangular(low, high, typical)
-    return round(value)
+    # 정수로 반올림하되 float 로 돌려준다. BPM 은 소수가 될 수 있는 값이고
+    # (MIDI 는 템포를 정수 마이크로초로 저장하므로 왕복하면 소수가 된다),
+    # 여기서 int 를 돌려주면 타입이 섞여서 비교할 때마다 걸린다.
+    return float(round(value))
 
 
 def select_instruments(
