@@ -1,0 +1,15 @@
+# MYVOCAL Studio 가 필요로 하는 것
+#
+#   pip install -r requirements.txt
+#
+# 반드시 필요한 것
+numpy>=1.24
+scipy>=1.10
+soundfile>=0.12
+mido>=1.3
+
+# 화면 (없으면 명령줄로만 쓸 수 있다)
+PySide6-Essentials>=6.6
+
+# 소리 재생 (없으면 파일로 내보내서 들어야 한다)
+sounddevice>=0.4
