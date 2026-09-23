@@ -77,6 +77,11 @@ def build_arguments() -> list[str]:
         "--hidden-import", "scipy.signal",
         "--hidden-import", "scipy.special",
     ]
+    # Claude 작사는 필요할 때만 불러오므로(함수 안에서 import) PyInstaller 가
+    # 스스로 못 찾는다. 설치돼 있으면 통째로 넣는다.
+    import importlib.util
+    if importlib.util.find_spec("anthropic") is not None:
+        arguments += ["--collect-submodules", "anthropic", "--hidden-import", "anthropic"]
     icon = ROOT / "assets" / "icon.ico"
     if icon.exists():
         arguments += ["--icon", str(icon)]

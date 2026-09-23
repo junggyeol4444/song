@@ -328,6 +328,44 @@ def split_syllables(text: str) -> list[str]:
     return result
 
 
+def syllables_with_word_ends(text: str) -> list[tuple[str, bool]]:
+    """음절과 '그 뒤에 띄어쓰기가 오는가'. 가사를 음에 붙였다가 다시 보여줄 때
+    띄어쓰기를 되살리려면 이게 필요하다. 줄바꿈도 띄어쓰기로 친다."""
+    result: list[tuple[str, bool]] = []
+    for word in text.split():
+        pieces = split_syllables(word)
+        for index, piece in enumerate(pieces):
+            result.append((piece, index == len(pieces) - 1))
+    return result
+
+
 def count_syllables(text: str) -> int:
     """음절 수. 작사할 때 멜로디의 음 개수와 맞춰야 한다."""
     return len(split_syllables(text))
+
+
+# 조사 짝. 앞 말에 받침이 있으면 왼쪽, 없으면 오른쪽.
+_PARTICLE_PAIRS: dict[str, tuple[str, str]] = {
+    "을/를": ("을", "를"), "이/가": ("이", "가"), "은/는": ("은", "는"),
+    "과/와": ("과", "와"), "으로/로": ("으로", "로"), "이에요/예요": ("이에요", "예요"),
+}
+
+
+def attach_particle(word: str, pair: str) -> str:
+    """말 뒤에 맞는 조사를 붙인다. '작사' + 을/를 -> '작사를', '곡 기획' -> '곡 기획을'.
+
+    '으로/로' 는 ㄹ 받침 뒤에서도 '로' 다 ('서울로'). 한글이 아닌 글자로 끝나면
+    받침을 알 수 없으므로 '을(를)' 처럼 둘 다 적는다.
+    """
+    if pair not in _PARTICLE_PAIRS:
+        raise KoreanError(f"모르는 조사입니다: {pair!r} (가능: {', '.join(_PARTICLE_PAIRS)})")
+    with_final, without_final = _PARTICLE_PAIRS[pair]
+    last = word.rstrip()[-1:] if word.strip() else ""
+    if not last or not is_hangul_syllable(last):
+        return f"{word}{with_final}({without_final})"
+    final = decompose(last).final
+    if not final:
+        return word + without_final
+    if pair == "으로/로" and final == "ㄹ":
+        return word + without_final
+    return word + with_final

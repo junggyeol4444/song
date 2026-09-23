@@ -310,7 +310,8 @@ class StartScreen(QtWidgets.QWidget):
         layout.addWidget(heading)
 
         done = QtWidgets.QLabel(
-            "· 설명 한 줄로 작곡·편곡 (22개 장르, 혼합 가능)\n"
+            "· 설명 한 줄로 작사·작곡·편곡 (22개 장르, 혼합 가능)\n"
+            "· 가사를 한국어로 부르기 (기본 합성 목소리)\n"
             "· 15종 악기와 22종 드럼 합성\n"
             "· 피아노롤에서 한 음씩 편집\n"
             "· 믹싱·마스터링 (스트리밍 기준 음량 맞춤)\n"
@@ -326,8 +327,7 @@ class StartScreen(QtWidgets.QWidget):
         layout.addWidget(pending_heading)
 
         pending = QtWidgets.QLabel(
-            "· 작사\n"
-            "· 내 목소리 학습과 노래 합성\n"
+            "· 내 목소리 학습 (지금은 기본 합성 목소리로 부름)\n"
             "· 캐릭터 등록과 뮤직비디오"
         )
         pending.setWordWrap(True)

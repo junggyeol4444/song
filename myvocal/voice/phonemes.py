@@ -148,11 +148,15 @@ class SungSyllable:
 
     @property
     def vowel(self) -> Phoneme | None:
-        """이 음절의 중심 모음. 음높이가 실리는 곳이다."""
-        for phoneme in self.phonemes:
-            if phoneme.kind is PhonemeKind.VOWEL:
-                return phoneme
-        return None
+        """이 음절의 중심 모음. 음높이가 실리는 곳이다.
+
+        '여' 는 반모음 j 와 모음 ㅓ 로 펴진다. 둘 다 모음 소리지만 j 는 스쳐
+        지나가는 60ms 이고 중심은 ㅓ 다. 그래서 가장 긴 것을 고른다.
+        """
+        vowels = [p for p in self.phonemes if p.kind is PhonemeKind.VOWEL]
+        if not vowels:
+            return None
+        return max(vowels, key=lambda p: p.duration)
 
     def viseme_timeline(self) -> list[tuple[float, float, str]]:
         """입 모양이 언제 바뀌는지. (시작 초, 끝 초, 입 모양)"""

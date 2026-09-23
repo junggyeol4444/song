@@ -346,6 +346,49 @@ check_raises("음높이 0", lambda: sing("가", [(0, 0.5)], [0.0]), VoiceError)
 empty = SingingSynth().render([], [])
 check("빈 입력은 빈 소리", empty.frames, 0)
 
+# ---------------------------------------------------------------------------
+print("[크기] 모음마다 고른 크기, 튀는 소리 없음")
+# 예전에는 마찰음 잡음이 포먼트 직렬 사슬을 지나며 40dB 넘게 부풀었고,
+# 전체를 그 봉우리에 맞추느라 모음이 반주보다 30dB 작아 들리지 않았다.
+LEVEL_RATE = 24000
+
+
+def vowel_levels(text, pitches, rate=LEVEL_RATE):
+    times = [(i * 0.45, 0.42) for i in range(len(pitches))]
+    syllables = align_lyrics(text, times)
+    audio = SingingSynth(VoiceTimbre.preset("mezzo"), rate).render(syllables, pitches).data[0]
+    shift = max(0.0, -min(s.note_start + s.onset_offset for s in syllables))
+    vowels, consonants = [], []
+    for syllable in syllables:
+        vowel = syllable.vowel
+        a = int((syllable.note_start + shift + vowel.start) * rate)
+        b = int((syllable.note_start + shift + vowel.end) * rate)
+        vowels.append(20 * np.log10(np.sqrt(np.mean(audio[a:b] ** 2))))
+        for phoneme in syllable.phonemes:
+            if phoneme.symbol in ("ㅅ", "ㅆ"):
+                a = int((syllable.note_start + shift + phoneme.start) * rate)
+                b = int((syllable.note_start + shift + phoneme.end) * rate)
+                consonants.append(20 * np.log10(np.sqrt(np.mean(audio[a:b] ** 2)) + 1e-12))
+    return audio, vowels, consonants
+
+
+audio, vowels, _ = vowel_levels("아이우에오여기", [220, 262, 330, 392, 440, 494, 523])
+median = float(np.median(vowels))
+check_true("모음 크기가 목표 근처 (-14 dBFS ±3)", abs(median + 14.0) <= 3.0, f"({median:.1f})")
+spread = max(abs(v - median) for v in vowels)
+check_true("모음마다 크기 차이 ±4dB 안", spread <= 4.0,
+           f"({', '.join(f'{v:.1f}' for v in vowels)})")
+audio, vowels, fricatives = vowel_levels("사시사철 쓸쓸히", [330, 349, 392, 440, 392, 349, 330])
+frames = np.sqrt(np.mean(audio[: len(audio) // 240 * 240].reshape(-1, 240) ** 2, axis=1))
+loud = frames[frames > 1e-4]
+jump = 20 * np.log10(loud.max() / np.median(loud))
+check_true("마찰음 많은 문장에서도 튀는 봉우리 없음 (10ms 최대/중앙 12dB 이하)",
+           jump <= 12.0, f"({jump:.1f}dB)")
+check_true("넘치지 않는다", float(np.abs(audio).max()) <= 1.0, f"({np.abs(audio).max():.2f})")
+relative = float(np.median(fricatives) - np.median(vowels))
+check_true("ㅅ 은 들리되 모음보다 작다 (-16 ~ -3dB)", -16.0 <= relative <= -3.0,
+           f"({relative:.1f}dB)")
+
 print("\n" + "=" * 62)
 print(f"검증 항목 {checks}개")
 if failures:

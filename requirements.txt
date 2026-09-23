@@ -13,3 +13,6 @@ PySide6-Essentials>=6.6
 
 # 소리 재생 (없으면 파일로 내보내서 들어야 한다)
 sounddevice>=0.4
+
+# Claude 작사 (없으면 내장 규칙으로 작사한다. API 키도 필요하다)
+anthropic>=1.8

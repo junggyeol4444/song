@@ -31,31 +31,62 @@ def default_project_folder() -> Path:
 
 
 class ComposeWorker(QtCore.QThread):
-    """작곡을 딴 실뜨기에서 한다. 빠르지만 화면이 멈추는 것을 막는다."""
+    """작곡과 작사를 딴 실뜨기에서 한다. 화면이 멈추는 것을 막는다.
 
-    finished_ok = QtCore.Signal(object)
+    이 프로젝트는 아직 화면에 없으므로 여기서 고쳐도 된다.
+    """
+
+    finished_ok = QtCore.Signal(object, str)     # Project, 알릴 말
     failed = QtCore.Signal(str)
+    progressed = QtCore.Signal(str)
 
     def __init__(self, request, with_melody: bool, with_arrangement: bool,
+                 with_lyrics: bool = False,
                  parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._request = request
         self._with_melody = with_melody
         self._with_arrangement = with_arrangement
+        self._with_lyrics = with_lyrics and with_melody
 
     def run(self) -> None:
         try:
             from ..music.composer import Composer
 
+            self.progressed.emit("곡을 만들고 있습니다...")
             project = Composer(self._request).compose(
                 with_melody=self._with_melody,
                 with_arrangement=self._with_arrangement,
             )
-            self.finished_ok.emit(project)
         except Exception as error:
             self.failed.emit(
                 f"{type(error).__name__}: {error}\n\n{traceback.format_exc(limit=4)}"
             )
+            return
+        message = ""
+        if self._with_lyrics:
+            # 작사가 실패해도 곡은 살린다. 가사는 나중에 가사 탭에서 다시 쓸 수 있다.
+            try:
+                message = self._write_lyrics(project)
+            except Exception as error:
+                message = f"작사하지 못했습니다 ({error}). 가사 탭에서 다시 시도할 수 있습니다."
+        self.finished_ok.emit(project, message)
+
+    def _write_lyrics(self, project: Project) -> str:
+        from ..music.lyrics import LyricsBrief, lyrics_command, vocal_track, write_lyrics
+        from ..providers import default_registry
+
+        self.progressed.emit("가사를 쓰고 있습니다...")
+        track = vocal_track(project)
+        draft = write_lyrics(
+            project, track, default_registry(),
+            LyricsBrief(subject=self._request.subject, title=self._request.title,
+                        seed=self._request.seed),
+            on_progress=self.progressed.emit,
+        )
+        lyrics_command(track, draft).apply(project)
+        who = "Claude" if draft.provider == "anthropic" else "내장 규칙"
+        return f"가사: {who}" + (f" — {draft.note}" if draft.note else "")
 
 
 class Shell(QtWidgets.QMainWindow):
@@ -110,21 +141,25 @@ class Shell(QtWidgets.QMainWindow):
         self._progress.show()
 
         self._worker = ComposeWorker(
-            request, dialog.wants("melody"), dialog.wants("arrangement"), self
+            request, dialog.wants("melody"), dialog.wants("arrangement"),
+            dialog.wants("lyrics"), self
         )
+        self._worker.progressed.connect(
+            lambda text: self._progress.setLabelText(text) if self._progress else None)
         self._worker.finished_ok.connect(self._on_composed)
         self._worker.failed.connect(self._on_compose_failed)
         self._worker.start()
 
-    def _on_composed(self, project: Project) -> None:
+    def _on_composed(self, project: Project, message: str = "") -> None:
         if self._progress is not None:
             self._progress.close()
             self._progress = None
         self.open_editor(project)
         if self.editor is not None:
+            extra = f" {message}" if message else ""
             self.editor.status.showMessage(
                 f"'{project.meta.title}' 을 만들었습니다. "
-                f"F5 를 누르면 소리로 만듭니다.", 8000
+                f"F5 를 누르면 소리로 만듭니다.{extra}", 12000
             )
 
     def _on_compose_failed(self, message: str) -> None:

@@ -34,6 +34,7 @@ def check_environment() -> int:
         ("mido", "mido (MIDI)", True),
         ("PySide6", "PySide6 (화면)", False),
         ("sounddevice", "sounddevice (소리 재생)", False),
+        ("anthropic", "anthropic (Claude 작사)", False),
     ):
         try:
             __import__(module)
@@ -66,7 +67,7 @@ def check_environment() -> int:
 
 
 def make_song_headless(description: str, output: str, genre: str,
-                       seed: int | None, export_format: str) -> int:
+                       seed: int | None, export_format: str, lyrics: bool = True) -> int:
     """화면 없이 곡을 만들어 파일로 내보낸다."""
     from myvocal.audio.export import export_audio
     from myvocal.audio.renderer import render_project
@@ -91,6 +92,30 @@ def make_song_headless(description: str, output: str, genre: str,
     print(f"장르: {blend}")
     project = Composer(request).compose()
     print(project.summary())
+
+    if lyrics:
+        from myvocal.music.lyrics import LyricsBrief, lyrics_command, vocal_track, write_lyrics
+        from myvocal.providers import default_registry
+
+        print("\n가사 쓰는 중...")
+        try:
+            track = vocal_track(project)
+            draft = write_lyrics(project, track, default_registry(),
+                                 LyricsBrief(subject=description, title=request.title, seed=seed),
+                                 on_progress=lambda text: print(f"  {text}"))
+            lyrics_command(track, draft).apply(project)
+            who = "Claude" if draft.provider == "anthropic" else "내장 규칙"
+            print(f"작사: {who}" + (" (대체됨)" if draft.fell_back else ""))
+            if draft.note:
+                print(draft.note)
+            if draft.cost_note and draft.provider != "local":
+                print(draft.cost_note)
+            if draft.mismatches:
+                print(f"음절 수가 다른 줄 {len(draft.mismatches)}개는 멜로디를 맞췄습니다.")
+            print()
+            print(draft.text())
+        except Exception as error:
+            print(f"작사하지 못했습니다: {error}\n가사 없이 계속합니다.")
 
     target = Path(output)
     project.save(target.with_suffix(".mvp"))
@@ -118,6 +143,8 @@ def main() -> int:
     parser.add_argument("--genre", default="auto", help="장르 (예: 'rock 60 ballad 40')")
     parser.add_argument("--seed", type=int, default=None, help="같은 번호면 같은 곡")
     parser.add_argument("--format", default="wav24", help="오디오 형식 (wav24/flac/mp3 등)")
+    parser.add_argument("--no-lyrics", action="store_true",
+                        help="가사를 쓰지 않는다 (--song 과 함께)")
     arguments = parser.parse_args()
 
     if arguments.check:
@@ -126,7 +153,7 @@ def main() -> int:
     if arguments.song:
         return make_song_headless(
             arguments.song, arguments.out, arguments.genre,
-            arguments.seed, arguments.format,
+            arguments.seed, arguments.format, lyrics=not arguments.no_lyrics,
         )
 
     try:

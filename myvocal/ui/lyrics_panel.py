@@ -21,7 +21,7 @@ from ..core.project import Project
 from ..core.tracks import Track
 from ..music.structure import SECTION_COLORS, Section
 from ..music.theory import Pitch
-from ..voice.korean import count_syllables, pronounce, split_syllables
+from ..voice.korean import count_syllables, pronounce, split_syllables, syllables_with_word_ends
 from .theme import DARK, Palette
 
 
@@ -43,8 +43,20 @@ class LyricLine:
         return SECTION_COLORS.get(self.section.kind, "#888888")
 
     @property
+    def phrases(self) -> list[list[Note]]:
+        """숨 쉬는 자리(쉼표)로 나눈 줄들."""
+        from ..music.lyrics import melody_lines
+        return melody_lines(self.notes)
+
+    @property
     def text(self) -> str:
-        return "".join(n.lyric for n in self.notes)
+        """줄마다 끊어서 보여준다. 한 줄로 이어 붙이면 어디서 숨 쉬는지 안 보이고,
+        칸 밖으로 넘친다."""
+        lines = ["".join(n.lyric + (" " if n.word_end else "") for n in phrase).strip()
+                 for phrase in self.phrases]
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines) if any(lines) else ""
 
     @property
     def filled(self) -> int:
@@ -84,10 +96,15 @@ class SectionLyricEditor(QtWidgets.QFrame):
 
         self.editor = QtWidgets.QPlainTextEdit()
         self.editor.setPlainText(line.text)
+        pattern = " / ".join(str(len(p)) for p in line.phrases)
         self.editor.setPlaceholderText(
-            f"이 구간의 가사 ({len(line.notes)}음절)"
+            f"이 구간의 가사 ({len(line.notes)}음절 — 줄마다 {pattern})"
         )
-        self.editor.setFixedHeight(56)
+        self.editor.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.editor.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rows = max(2, len(line.phrases))
+        spacing = self.editor.fontMetrics().lineSpacing()
+        self.editor.setFixedHeight(rows * spacing + 26)
         self.editor.setTabChangesFocus(True)
         layout.addWidget(self.editor)
 
@@ -128,9 +145,12 @@ class SectionLyricEditor(QtWidgets.QFrame):
         self.count_label.setStyleSheet(f"background: transparent; color: {color};")
 
         if text.strip():
-            spoken = pronounce(text)
-            if spoken != text:
-                hint = (hint + "  " if hint else "") + f"실제 발음: {spoken}"
+            # 발음 규칙은 한 호흡 안에서만 적용된다. 줄을 넘어 이어 읽지 않는다.
+            lines = [line for line in text.splitlines() if line.strip()]
+            spoken_lines = [pronounce(line) for line in lines]
+            if spoken_lines != lines:
+                spoken = "\n".join(spoken_lines)
+                hint = (hint + "\n" if hint else "") + f"실제 발음:\n{spoken}"
         self.hint_label.setText(hint)
 
     def refresh(self) -> None:
@@ -145,6 +165,7 @@ class LyricsPanel(QtWidgets.QWidget):
 
     lyrics_applied = QtCore.Signal(object, list)   # Track, [(Note, 새 Note), ...]
     note_focused = QtCore.Signal(int)              # tick
+    ai_requested = QtCore.Signal(object, str)      # Track, 작사 지시
 
     def __init__(self, palette: Palette = DARK,
                  parent: QtWidgets.QWidget | None = None) -> None:
@@ -177,6 +198,8 @@ class LyricsPanel(QtWidgets.QWidget):
 
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
+        # 가로로 넘치면 글자가 잘려 보인다. 가로 스크롤 대신 칸이 폭에 맞춘다.
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self._container = QtWidgets.QWidget()
         self._container_layout = QtWidgets.QVBoxLayout(self._container)
@@ -185,6 +208,20 @@ class LyricsPanel(QtWidgets.QWidget):
         self._container_layout.addStretch(1)
         scroll.setWidget(self._container)
         layout.addWidget(scroll, 1)
+
+        ai_row = QtWidgets.QHBoxLayout()
+        self.direction_edit = QtWidgets.QLineEdit()
+        self.direction_edit.setPlaceholderText("작사 지시 (선택)")
+        self.direction_edit.setToolTip("예: 후렴은 희망적으로 / 벌스는 담담하게")
+        ai_row.addWidget(self.direction_edit, 1)
+        self.ai_button = QtWidgets.QPushButton("✨ AI 작사")
+        self.ai_button.setToolTip(
+            "멜로디의 음 개수에 맞춰 가사를 씁니다. 곡 설명을 주제로 씁니다.\n"
+            "API 키가 있으면 Claude 가, 없으면 내장 규칙이 씁니다."
+        )
+        self.ai_button.clicked.connect(self._on_ai_clicked)
+        ai_row.addWidget(self.ai_button)
+        layout.addLayout(ai_row)
 
         buttons = QtWidgets.QHBoxLayout()
         self.clear_button = QtWidgets.QPushButton("가사 지우기")
@@ -204,6 +241,20 @@ class LyricsPanel(QtWidgets.QWidget):
         note.setObjectName("Faint")
         note.setWordWrap(True)
         layout.addWidget(note)
+
+    # ---------------------------------------------------------------- AI 작사
+
+    def _on_ai_clicked(self) -> None:
+        if self.track is None:
+            return
+        self.ai_requested.emit(self.track, self.direction_edit.text().strip())
+
+    def set_busy(self, busy: bool) -> None:
+        """작사 중에는 단추를 잠근다. 두 번 누르면 요청이 두 번 나간다."""
+        self.ai_button.setEnabled(not busy)
+        self.ai_button.setText("작사 중..." if busy else "✨ AI 작사")
+        self.apply_button.setEnabled(not busy)
+        self.clear_button.setEnabled(not busy)
 
     # ---------------------------------------------------------------- 자료
 
@@ -290,11 +341,11 @@ class LyricsPanel(QtWidgets.QWidget):
         for editor in self._editors:
             line = editor.line
             text = editor.editor.toPlainText()
-            pieces = split_syllables(text)
+            pieces = syllables_with_word_ends(text)
             for index, note in enumerate(line.notes):
-                syllable = pieces[index] if index < len(pieces) else ""
-                if syllable != note.lyric:
-                    changes.append((note, note.with_lyric(syllable)))
+                syllable, word_end = pieces[index] if index < len(pieces) else ("", False)
+                if (syllable, word_end) != (note.lyric, note.word_end):
+                    changes.append((note, note.with_lyric(syllable, word_end=word_end)))
         if changes:
             self.lyrics_applied.emit(self.track, changes)
 

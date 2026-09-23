@@ -27,6 +27,10 @@ from ..core.project import Project
 from ..core.tracks import Track
 from ..core.units import PPQ
 from ..music.instruments import available_instruments, create_instrument
+from ..music.lyrics import (
+    LyricsBrief, LyricsDraft, LyricsError, lyrics_command, prepare_lyrics, request_lyrics,
+)
+from ..providers import default_registry
 from ..music.structure import SECTION_COLORS
 from ..music.theory import Key
 from .lyrics_panel import LyricsPanel
@@ -66,6 +70,73 @@ class RenderWorker(QtCore.QThread):
             self.failed.emit(f"{type(error).__name__}: {error}")
 
 
+class LyricsWorker(QtCore.QThread):
+    """가사를 받아 오는 일을 딴 실뜨기에서 한다.
+
+    Claude 에 물으면 수십 초가 걸릴 수 있다. 그동안 창이 얼면 안 된다.
+    프로젝트는 읽지도 쓰지도 않는다. 틀은 화면 실뜨기에서 미리 읽어 넘긴다.
+    """
+
+    finished_ok = QtCore.Signal(object)      # LyricsDraft
+    failed = QtCore.Signal(str)
+    progressed = QtCore.Signal(str)
+
+    def __init__(self, slots, payload: dict,
+                 parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._slots = slots
+        self._payload = payload
+
+    def run(self) -> None:
+        try:
+            draft = request_lyrics(self._slots, self._payload, default_registry(),
+                                   on_progress=self.progressed.emit)
+            self.finished_ok.emit(draft)
+        except Exception as error:
+            self.failed.emit(f"{type(error).__name__}: {error}")
+
+
+class LyricsPreviewDialog(QtWidgets.QDialog):
+    """받은 가사를 보여주고, 붙일지 묻는다."""
+
+    def __init__(self, draft: LyricsDraft, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AI 작사 결과")
+        self.resize(520, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        who = {"local": "MYVOCAL 내장 규칙", "anthropic": "Claude"}.get(
+            draft.provider, draft.provider)
+        info = [f"작사: {who}"]
+        if draft.fell_back:
+            info.append("(먼저 시도한 서비스가 실패해서 대신 썼습니다)")
+        if draft.note:
+            info.append(draft.note)
+        if draft.cost_note and draft.provider != "local":
+            info.append(draft.cost_note)
+        if draft.mismatches:
+            info.append(
+                f"음절 수가 멜로디와 다른 줄 {len(draft.mismatches)}개 — 붙일 때 멜로디를 "
+                f"가사에 맞춥니다 (짧은 음을 합치거나 긴 음을 나눔)."
+            )
+        label = QtWidgets.QLabel("\n".join(info))
+        label.setWordWrap(True)
+        label.setObjectName("Dim")
+        layout.addWidget(label)
+
+        text = QtWidgets.QPlainTextEdit(draft.text())
+        text.setReadOnly(True)
+        layout.addWidget(text, 1)
+
+        buttons = QtWidgets.QDialogButtonBox()
+        apply_button = buttons.addButton("음에 붙이기", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        apply_button.setObjectName("Primary")
+        buttons.addButton("버리기", QtWidgets.QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """편집기 창."""
 
@@ -79,6 +150,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playback = create_engine()
         self.render_options = RenderOptions(sample_rate=self.project.sample_rate)
         self._worker: RenderWorker | None = None
+        self._lyrics_worker: LyricsWorker | None = None
+        self._lyrics_track: Track | None = None
         self._render_dirty = True
         self._rendered_audio: AudioBuffer | None = None
 
@@ -244,6 +317,11 @@ class MainWindow(QtWidgets.QMainWindow):
         play_menu.addSeparator()
         self._action(play_menu, "소리 만들기", "F5", self.start_render)
 
+        tools_menu = bar.addMenu("도구")
+        self._action(tools_menu, "AI 작사", "Ctrl+L", self.request_ai_lyrics)
+        tools_menu.addSeparator()
+        self._action(tools_menu, "AI 서비스 설정...", "", self.show_provider_settings)
+
         help_menu = bar.addMenu("도움말")
         self._action(help_menu, "소리 장치 확인", "", self.show_audio_info)
         self._action(help_menu, "단축키", "", self.show_shortcuts)
@@ -280,6 +358,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.structure_list.itemDoubleClicked.connect(self._on_structure_activated)
         self.lyrics_panel.lyrics_applied.connect(self._on_lyrics_applied)
         self.lyrics_panel.note_focused.connect(self._on_seek)
+        self.lyrics_panel.ai_requested.connect(self._on_ai_lyrics)
         self.history.add_listener(lambda what: self._refresh_history())
 
     # ---------------------------------------------------------------- 자료
@@ -416,6 +495,74 @@ class MainWindow(QtWidgets.QMainWindow):
             f"가사를 붙였습니다 — 음 {len(changes)}개 수정 (가사 있는 음 {filled}개)", 5000
         )
 
+    # ---------------------------------------------------------------- AI 작사
+
+    def request_ai_lyrics(self) -> None:
+        """메뉴에서 부를 때. 가사 탭의 트랙과 지시를 쓴다."""
+        self.side_tabs.setCurrentWidget(self.lyrics_panel)
+        track = self.lyrics_panel.track
+        if track is None:
+            self.status.showMessage("가사를 붙일 트랙이 없습니다.", 3000)
+            return
+        self._on_ai_lyrics(track, self.lyrics_panel.direction_edit.text().strip())
+
+    def _on_ai_lyrics(self, track: Track, direction: str) -> None:
+        if self._lyrics_worker is not None and self._lyrics_worker.isRunning():
+            self.status.showMessage("이미 작사하고 있습니다.", 2000)
+            return
+        try:
+            slots, payload = prepare_lyrics(
+                self.project, track,
+                LyricsBrief(subject=self.project.meta.description, extra=direction),
+            )
+        except LyricsError as error:
+            QtWidgets.QMessageBox.information(self, "작사할 수 없습니다", str(error))
+            return
+        self._lyrics_track = track
+        self.lyrics_panel.set_busy(True)
+        self.status.showMessage("작사 중...")
+        self._lyrics_worker = LyricsWorker(slots, payload, self)
+        self._lyrics_worker.progressed.connect(lambda text: self.status.showMessage(text))
+        self._lyrics_worker.finished_ok.connect(self._on_lyrics_ready)
+        self._lyrics_worker.failed.connect(self._on_lyrics_failed)
+        self._lyrics_worker.start()
+
+    def _on_lyrics_ready(self, draft: LyricsDraft) -> None:
+        self.lyrics_panel.set_busy(False)
+        track = self._lyrics_track
+        if track is None or track not in list(self.project.tracks):
+            self.status.showMessage("작사하는 동안 트랙이 사라졌습니다.", 4000)
+            return
+        if draft.is_stale(track):
+            QtWidgets.QMessageBox.information(
+                self, "멜로디가 바뀌었습니다",
+                "가사를 받는 동안 멜로디가 바뀌어 붙이지 않았습니다. 다시 작사해 주세요.")
+            return
+        self.status.showMessage("가사가 왔습니다.", 3000)
+        if LyricsPreviewDialog(draft, self).exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        try:
+            command = lyrics_command(track, draft)
+        except LyricsError as error:
+            QtWidgets.QMessageBox.warning(self, "가사를 붙일 수 없습니다", str(error))
+            return
+        self._run(command)
+        self.lyrics_panel.refresh()
+        self.status.showMessage(
+            "가사를 붙였습니다. F5 를 누르면 그 가사로 부릅니다. (Ctrl+Z 로 되돌림)", 8000)
+
+    def _on_lyrics_failed(self, message: str) -> None:
+        self.lyrics_panel.set_busy(False)
+        QtWidgets.QMessageBox.critical(self, "작사하지 못했습니다", message)
+        self.status.showMessage("작사 실패", 4000)
+
+    def show_provider_settings(self) -> None:
+        from .settings_dialog import ProviderSettingsDialog
+
+        dialog = ProviderSettingsDialog(palette=self._palette, parent=self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.status.showMessage("AI 서비스 설정을 저장했습니다.", 4000)
+
     def delete_selected(self) -> None:
         notes = self.piano_roll.selected_notes()
         track = self.piano_roll.track
@@ -430,6 +577,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"되돌림: {description}", 2500)
         self._mark_dirty()
         self._refresh_sections()
+        self.lyrics_panel.refresh()
 
     def redo(self) -> None:
         if not self.history.can_redo:
@@ -438,6 +586,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"다시 실행: {description}", 2500)
         self._mark_dirty()
         self._refresh_sections()
+        self.lyrics_panel.refresh()
 
     def _on_track_selected(self, track: Track) -> None:
         self.piano_roll.set_track(track, self.project.meter, self.project.tempo)
@@ -801,6 +950,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(2000)
+        if self._lyrics_worker is not None and self._lyrics_worker.isRunning():
+            self._lyrics_worker.terminate()
+            self._lyrics_worker.wait(2000)
         self.playback.stop()
         if self._confirm_discard():
             event.accept()

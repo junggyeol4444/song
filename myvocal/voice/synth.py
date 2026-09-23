@@ -184,7 +184,8 @@ class SingingSynth:
         formants = np.zeros((3, total_frames))
         amplitude = np.zeros(total_frames)
         voicing = np.zeros(total_frames)      # 1 = 성대 울림, 0 = 바람소리만
-        noise_level = np.zeros(total_frames)
+        noise_level = np.zeros(total_frames)      # 성문 바람 (숨소리). 성도를 지난다.
+        frication = np.zeros(total_frames)        # 입 안 좁은 곳의 바람 (ㅅ, 터짐). 성도를 안 지난다.
         noise_center = np.full(total_frames, 2000.0)
         nasal = np.zeros(total_frames)
 
@@ -232,32 +233,30 @@ class SingingSynth:
                     noise_level[span] = 0.03
 
                 elif phoneme.kind is PhonemeKind.PLOSIVE:
-                    # 막았다 터뜨린다. 앞쪽은 거의 무음, 끝에서 짧게 터진다.
+                    # 막았다 터뜨린다. 앞쪽은 무음, 끝에서 짧게 터진다.
+                    # 터짐의 바람은 입 앞쪽에서 나므로 성도 공명을 지나지 않는다 (Klatt 병렬 가지).
                     burst_start = max(start, end - int(0.012 * rate))
-                    amplitude[start:burst_start] = 0.02
-                    voicing[start:burst_start] = 0.0
-                    amplitude[burst_start:end] = 0.55
-                    voicing[burst_start:end] = 0.0
-                    noise_level[burst_start:end] = 0.9
-                    noise_level[start:burst_start] = 0.02
+                    amplitude[span] = 0.0
+                    voicing[span] = 0.0
+                    frication[burst_start:end] = 0.8 + 0.4 * phoneme.aspiration
                     noise_center[span] = phoneme.center_hz or 2000.0
-                    formants[0, span] = min(1200.0, phoneme.center_hz * 0.35) * scale
-                    formants[1, span] = phoneme.center_hz * scale
-                    formants[2, span] = min(rate * 0.45, phoneme.center_hz * 1.7 * scale)
 
                 elif phoneme.kind in (PhonemeKind.FRICATIVE, PhonemeKind.AFFRICATE):
                     if phoneme.kind is PhonemeKind.AFFRICATE:
                         # 파찰음은 앞이 막음, 뒤가 마찰이다
                         stop_end = start + int((end - start) * 0.35)
-                        amplitude[start:stop_end] = 0.03
-                        noise_level[start:stop_end] = 0.05
+                        amplitude[start:stop_end] = 0.0
+                        voicing[start:stop_end] = 0.0
                         span = slice(stop_end, end)
-                    amplitude[span] = 0.5
+                    amplitude[span] = 0.0
                     voicing[span] = 0.0
-                    noise_level[span] = 1.0
+                    # 'ㅎ' 는 성문에서 나는 바람이라 성도를 지난다. 나머지는 입 안에서 난다.
+                    if phoneme.symbol == "ㅎ":
+                        amplitude[span] = 0.5
+                        noise_level[span] = 1.0
+                    else:
+                        frication[span] = 1.0
                     noise_center[span] = phoneme.center_hz or 4000.0
-                    formants[1, span] = phoneme.center_hz * scale
-                    formants[2, span] = min(rate * 0.45, phoneme.center_hz * 1.3 * scale)
 
         # 값이 뚝 끊기지 않게 잇는다. 5ms 이동평균이면 딸깍거림이 사라지고
         # 발음은 그대로 남는다.
@@ -268,12 +267,14 @@ class SingingSynth:
         amplitude = np.convolve(amplitude, kernel, mode="same")
         voicing = np.convolve(voicing, kernel, mode="same")
         noise_level = np.convolve(noise_level, kernel, mode="same")
+        frication = np.convolve(frication, kernel, mode="same")
         noise_center = np.convolve(noise_center, np.ones(window * 2) / (window * 2),
                                    mode="same")
 
         return {
             "formants": formants, "amplitude": amplitude, "voicing": voicing,
-            "noise": noise_level, "noise_center": noise_center, "nasal": nasal,
+            "noise": noise_level, "frication": frication, "noise_center": noise_center,
+            "nasal": nasal,
         }
 
     def _pitch_track(
@@ -382,6 +383,7 @@ class SingingSynth:
         # --- 바람 소리 ---
         generator = np.random.default_rng(12345)
         noise = generator.standard_normal(total_frames) * 0.5
+        oral_noise = generator.standard_normal(total_frames)
 
         # --- 포먼트 공명 ---
         # 계수가 계속 바뀌므로 블록마다 다시 만들어 상태를 이어 간다.
@@ -390,10 +392,13 @@ class SingingSynth:
         noise_level = tracks["noise"]
         noise_center = tracks["noise_center"]
         nasal = tracks["nasal"]
+        frication = tracks["frication"]
 
         output = np.zeros(total_frames)
+        fricative = np.zeros(total_frames)
         states = [np.zeros(2) for _ in range(5)]
         noise_state = np.zeros(2)
+        fricative_state = np.zeros(2)
         scale = self.timbre.formant_scale
 
         for begin in range(0, total_frames, self.BLOCK):
@@ -411,6 +416,17 @@ class SingingSynth:
             )
 
             mixed = block_source + filtered_noise * 1.4
+
+            # 입 안에서 나는 바람 (ㅅ, 터짐). 성도 공명을 지나지 않는 병렬 가지다.
+            # 이걸 포먼트 직렬 사슬에 넣으면, 평평한 잡음이 높은 포먼트에서 40dB
+            # 넘게 부풀어 모음보다 수십 배 큰 봉우리가 생긴다. Klatt 합성기가
+            # 마찰음을 병렬 가지로 따로 내는 이유가 이것이다.
+            block_fric = frication[begin:end]
+            if block_fric.any() or fricative_state.any():
+                b, a = _resonator(center, max(1000.0, center * 0.6), rate, normalize="peak")
+                fricative[begin:end], fricative_state = scipy_signal.lfilter(
+                    b, a, oral_noise[begin:end] * block_fric, zi=fricative_state
+                )
 
             # 포먼트 다섯 개를 직렬로 잇는다. 성도는 하나의 관이고 공명이
             # 그 안에서 차례로 일어나므로, 병렬로 더하는 것보다 직렬이 맞다.
@@ -445,10 +461,109 @@ class SingingSynth:
         sos = scipy_signal.butter(2, 70.0, btype="highpass", fs=rate, output="sos")
         output = scipy_signal.sosfilt(sos, output)
 
-        peak = float(np.max(np.abs(output)))
-        if peak > 0:
-            output = output / peak * 0.85
-        return AudioBuffer.from_mono(output, rate)
+        output = self._level_syllables(output, syllables)
+        output = output + self._scale_frication(fricative, frication)
+        return AudioBuffer.from_mono(self._soft_limit(output), rate)
+
+    # 마찰음 크기. 모음보다 8dB 작게. 노래에서 'ㅅ' 이 안 들리면 발음이 뭉개지고,
+    # 너무 크면 치찰음이 귀를 찌른다.
+    FRICATION_RELATIVE = 0.4
+
+    def _scale_frication(self, fricative: np.ndarray, track: np.ndarray) -> np.ndarray:
+        """마찰 소리를 모음 크기에 맞춘다. 온전히 마찰하는 구간의 크기를 기준으로 한다."""
+        steady = track > 0.9
+        if not steady.any():
+            steady = track > 0.3
+        if not steady.any():
+            return fricative
+        level = float(np.sqrt(np.mean(fricative[steady] ** 2)))
+        if level <= 1e-12:
+            return fricative
+        return fricative * (self.TARGET_VOWEL_RMS * self.FRICATION_RELATIVE / level)
+
+    @staticmethod
+    def _soft_limit(signal: np.ndarray, knee: float = 0.7) -> np.ndarray:
+        """봉우리만 부드럽게 누른다. knee 까지는 그대로 둔다."""
+        result = signal.copy()
+        magnitude = np.abs(result)
+        over = magnitude > knee
+        if over.any():
+            squeezed = knee + (1.0 - knee) * np.tanh((magnitude[over] - knee) / (1.0 - knee))
+            result[over] = np.sign(result[over]) * squeezed * 0.98
+        return result
+
+    # 노래하는 모음의 목표 크기 (RMS). -14 dBFS 쯤이다. 반주 악기 한 대와
+    # 비슷한 크기라서, 믹스에서 보컬이 묻히지 않는다.
+    TARGET_VOWEL_RMS = 0.2
+
+    def _level_syllables(self, output: np.ndarray,
+                         syllables: Sequence[SungSyllable]) -> np.ndarray:
+        """음절마다 모음 크기를 맞춘다.
+
+        포먼트 공명은 모음마다, 음높이마다 전체 이득이 크게 다르다. 배음이
+        포먼트 봉우리에 걸리면 커지고 비켜 가면 작아진다. 재 보면 같은 세기로
+        불러도 '다' 와 '여' 가 20dB 넘게 차이 난다. 사람은 그렇게 부르지 않는다.
+        가수는 모음이 바뀌어도 크기를 고르게 유지한다.
+
+        또 전체를 가장 큰 순간(대개 자음 터짐) 기준으로 맞추면 나머지가 전부
+        작아져서 반주에 묻힌다. 그래서 봉우리가 아니라 모음의 평균 크기로 맞추고,
+        삐져나오는 자음 봉우리만 부드럽게 누른다.
+
+        자음과 모음의 비율은 음절 안에서 그대로 둔다 (음절 전체에 같은 이득).
+        """
+        rate = self.sample_rate
+        frames = len(output)
+        spans: list[tuple[int, int, float]] = []
+        for index, syllable in enumerate(syllables):
+            vowel = syllable.vowel
+            if vowel is None:
+                continue
+            a = max(0, int((syllable.note_start + vowel.start) * rate))
+            b = min(frames, int((syllable.note_start + vowel.end) * rate))
+            if b - a < int(0.02 * rate):
+                continue
+            # 평균이 아니라 10ms 창 크기들의 중앙값. 전이 구간의 순간 봉우리 하나가
+            # 평균을 끌어올려 모음 전체를 작게 만드는 일을 막는다.
+            window = max(1, int(0.01 * rate))
+            segment = output[a:b]
+            usable = len(segment) // window * window
+            if usable >= window:
+                frames_rms = np.sqrt(np.mean(segment[:usable].reshape(-1, window) ** 2, axis=1))
+                level = float(np.median(frames_rms))
+            else:
+                level = float(np.sqrt(np.mean(segment ** 2)))
+            if level <= 1e-9:
+                continue
+            begin = max(0, int((syllable.note_start + syllable.onset_offset) * rate))
+            if index + 1 < len(syllables):
+                following = syllables[index + 1]
+                finish = int((following.note_start + following.onset_offset) * rate)
+            else:
+                finish = frames
+            spans.append((begin, max(begin + 1, min(frames, finish)), level))
+
+        if not spans:
+            level = float(np.sqrt(np.mean(output ** 2))) if frames else 0.0
+            return output * (self.TARGET_VOWEL_RMS / level) if level > 1e-12 else output
+
+        gain = np.zeros(frames)
+        covered = np.zeros(frames, dtype=bool)
+        for begin, finish, level in spans:
+            # 너무 작은 것을 끝없이 키우면 잡음까지 커진다. -12 ~ +24 dB 로 묶는다.
+            value = float(np.clip(self.TARGET_VOWEL_RMS / level, 0.25, 16.0))
+            gain[begin:finish] = value
+            covered[begin:finish] = True
+        # 음절 밖(꼬리, 첫 자음 앞)은 가장 가까운 음절의 이득을 쓴다
+        if not covered.all():
+            indices = np.where(covered)[0]
+            nearest = np.searchsorted(indices, np.arange(frames)).clip(0, len(indices) - 1)
+            gain = np.where(covered, gain, gain[indices[nearest]])
+        # 이득이 음절 경계에서 뚝 바뀌면 딸깍 소리가 난다. 15ms 로 부드럽게.
+        width = max(1, int(0.015 * rate))
+        kernel = np.ones(width) / width
+        gain = np.convolve(np.pad(gain, (width // 2, width - width // 2 - 1), mode="edge"),
+                           kernel, mode="valid")
+        return output * gain
 
 
 def sing(

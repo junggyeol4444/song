@@ -61,6 +61,7 @@ class Note:
     phonemes: tuple[str, ...] = ()  # 발음 기호. 립싱크가 이걸 쓴다.
     expression: dict[str, float | str] = field(default_factory=dict)
     tied_to_next: bool = False      # 다음 음과 이어져 한 소리로 들린다
+    word_end: bool = False          # 이 음의 가사 뒤에 띄어쓰기가 온다 (가사를 다시 보여줄 때)
     note_id: int = 0                # 프로젝트 안에서 고유. 편집 명령이 대상을 가리킬 때 쓴다.
 
     def __post_init__(self) -> None:
@@ -139,8 +140,10 @@ class Note:
     def with_velocity(self, velocity: int) -> "Note":
         return replace(self, velocity=velocity)
 
-    def with_lyric(self, lyric: str, phonemes: Sequence[str] = ()) -> "Note":
-        return replace(self, lyric=lyric, phonemes=tuple(phonemes))
+    def with_lyric(self, lyric: str, phonemes: Sequence[str] = (),
+                   word_end: bool = False) -> "Note":
+        return replace(self, lyric=lyric, phonemes=tuple(phonemes),
+                       word_end=bool(lyric) and word_end)
 
     def with_expression(self, **values: float | str) -> "Note":
         merged = dict(self.expression)
@@ -167,6 +170,8 @@ class Note:
             data["expression"] = dict(self.expression)
         if self.tied_to_next:
             data["tied"] = True
+        if self.word_end:
+            data["word_end"] = True
         if self.note_id:
             data["id"] = self.note_id
         return data
@@ -183,6 +188,7 @@ class Note:
                 phonemes=tuple(data.get("phonemes", ())),
                 expression=dict(data.get("expression", {})),
                 tied_to_next=bool(data.get("tied", False)),
+                word_end=bool(data.get("word_end", False)),
                 note_id=int(data.get("id", 0)),
             )
         except KeyError as error:

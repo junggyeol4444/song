@@ -189,8 +189,10 @@ class CreateSongDialog(QtWidgets.QDialog):
         entries = (
             ("melody", "멜로디", True, True, ""),
             ("arrangement", "편곡 (베이스·드럼·반주)", True, True, ""),
-            ("lyrics", "가사", False, False, "작사는 아직 만들고 있습니다."),
-            ("singing", "내 목소리로 노래", False, False, "목소리 합성은 아직 만들고 있습니다."),
+            ("lyrics", "가사", True, True,
+             "멜로디에 맞춰 가사를 씁니다. API 키가 있으면 Claude, 없으면 내장 규칙."),
+            ("singing", "내 목소리로 노래", False, False,
+             "목소리 학습(6번)이 아직 없습니다. 지금은 가사가 있으면 기본 합성 목소리로 부릅니다."),
             ("mix", "믹싱", True, True, ""),
             ("master", "마스터링", True, True, ""),
             ("storyboard", "장면 구성", False, False, "영상은 아직 만들고 있습니다."),

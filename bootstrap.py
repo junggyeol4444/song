@@ -23,6 +23,7 @@ REQUIRED = (
     ("mido", "mido", True),
     ("PySide6", "PySide6-Essentials", False),
     ("sounddevice", "sounddevice", False),
+    ("anthropic", "anthropic", False),
 )
 
 
@@ -98,6 +99,7 @@ def main() -> int:
             reason = {
                 "PySide6-Essentials": "화면 (없으면 명령줄로만 쓸 수 있습니다)",
                 "sounddevice": "소리 재생 (없으면 파일로 내보내서 들어야 합니다)",
+                "anthropic": "Claude 작사 (없으면 내장 규칙으로 작사합니다)",
             }.get(name, "")
             print(f"  · {name} — {reason}")
         answer = input("\n설치할까요? [Y/n] ").strip().lower()

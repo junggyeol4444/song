@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Sequence
 
 from ..core.notes import Note
@@ -54,7 +54,9 @@ ENTRY_THRESHOLD: dict[str, float] = {
 
 # 역할별 기본 음량과 좌우 위치. 믹스의 출발점이다.
 ROLE_MIX: dict[str, tuple[float, float]] = {
-    "vocal":        (0.0, 0.0),
+    # 보컬은 반주 전체와 비슷한 크기여야 가사가 들린다. 0dB 일 때 재 보니
+    # 반주 합보다 벌스 3.5dB, 후렴 5.7dB 작았다. 3dB 올려 그 차이를 줄인다.
+    "vocal":        (3.0, 0.0),
     "bass":         (-3.0, 0.0),
     "drums":        (-3.5, 0.0),
     "chords":       (-7.0, -0.2),
@@ -229,7 +231,7 @@ class Composer:
         # 구간마다 코드 진행을 만든다. 같은 종류의 구간은 같은 진행을 쓴다.
         # 후렴이 나올 때마다 화음이 다르면 사람이 후렴으로 인식하지 못한다.
         progressions: dict[str, ChordProgression] = {}
-        section_progressions: list[tuple[Section, ChordProgression]] = []
+        section_progressions: list[tuple[Section, ChordProgression, str]] = []
         for section in structure:
             blend = section.genre or self.blend
             profile = blend.resolve()
@@ -252,7 +254,7 @@ class Composer:
                     # 마지막 두 마디를 종지로 바꾼다. 길이는 그대로 둔다.
                     progression = apply_cadence(progression, cadence, beats_per_bar)
                 progressions[cache_key] = progression
-            section_progressions.append((section, progression))
+            section_progressions.append((section, progression, cache_key))
 
         # 트랙을 만든다. 구간마다 악기가 다르므로, 곡 전체에서 한 번이라도
         # 쓰이는 악기에 대해 트랙을 하나씩 만들고 거기에 음을 넣는다.
@@ -279,7 +281,12 @@ class Composer:
                 generated_by="ai_composer",
             )
 
-        for section, progression in section_progressions:
+        # 같은 종류의 구간은 선율도 같아야 한다. 후렴 선율이 매번 다르면
+        # 후렴이 아니고, 같은 가사를 다시 부를 수도 없다 (음 개수가 달라지니까).
+        # 구간 시작을 0으로 둔 상대 위치로 보관했다가 옮겨 붙인다.
+        melodies: dict[str, list[Note]] = {}
+
+        for section, progression, cache_key in section_progressions:
             span = project.section_range(section)
             start_tick = span.start_tick
             energy = section.effective_energy()
@@ -291,13 +298,21 @@ class Composer:
             if with_melody and vocal_track is not None and section.kind not in (
                 "intro", "instrumental", "solo", "interlude", "outro", "breakdown", "drop"
             ):
-                melody = MelodyGenerator(
-                    key, profile, self.vocal_range, seed=seed
-                ).generate(
-                    progression, beats_per_bar, section.kind, energy,
-                    bars_per_phrase=2, start_tick=start_tick,
+                melody_key = f"{cache_key}:{section.kind}"
+                if melody_key not in melodies:
+                    melodies[melody_key] = _clip_to_span(
+                        MelodyGenerator(
+                            key, profile, self.vocal_range, seed=seed
+                        ).generate(
+                            progression, beats_per_bar, section.kind, energy,
+                            bars_per_phrase=2, start_tick=0,
+                        ),
+                        0, span.end_tick - span.start_tick,
+                    )
+                vocal_track.add_notes(
+                    replace(note, start_tick=note.start_tick + start_tick, note_id=0)
+                    for note in melodies[melody_key]
                 )
-                vocal_track.add_notes(_clip_to_span(melody, start_tick, span.end_tick))
 
             if not with_arrangement:
                 continue

@@ -17,6 +17,10 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 실제 사용자 설정(키)을 건드리지 않게 빈 설정 폴더를 쓴다
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+os.environ["APPDATA"] = os.environ["XDG_CONFIG_HOME"]
+os.environ.pop("ANTHROPIC_API_KEY", None)
 sys.path.insert(0, ".")
 
 failures: list[str] = []
@@ -391,6 +395,111 @@ check_true("가사 없는 음은 알려준다",
 window.undo()
 empty_vocal = renderer.render_vocal(lyrics.track, project.tempo, 48000, [])
 check("가사가 하나도 없으면 악기로 연주한다", empty_vocal, None)
+
+print("[14] AI 작사")
+import time as _time
+from myvocal.ui import main_window as main_window_module
+
+# 위 [13] 은 가사 탭에만 곡을 넣었다. 여기서는 편집기 전체에 곡을 연다.
+window.load_project(project)
+application.processEvents()
+lyrics = window.lyrics_panel
+check("편집기와 가사 탭이 같은 곡", lyrics.project is window.project, True)
+check_true("AI 작사 단추가 있다", lyrics.ai_button.isEnabled())
+check("시작 전 가사 없음", sum(1 for n in lyrics.track.notes if n.lyric), 0)
+shown = []
+
+
+def fake_exec(dialog):
+    shown.append(dialog.findChild(QtWidgets.QPlainTextEdit).toPlainText())
+    return QtWidgets.QDialog.DialogCode.Accepted
+
+
+main_window_module.LyricsPreviewDialog.exec = fake_exec
+history_before = len(window.history)
+lyrics.direction_edit.setText("후렴은 밝게")
+lyrics.ai_button.click()
+check_true("작사 중에는 단추가 잠긴다", not lyrics.ai_button.isEnabled())
+deadline = _time.time() + 60
+while (window._lyrics_worker is not None and window._lyrics_worker.isRunning()
+       and _time.time() < deadline):
+    application.processEvents()
+    _time.sleep(0.01)
+for _ in range(5):
+    application.processEvents()
+check_true("작사가 끝난다", not window._lyrics_worker.isRunning())
+check_true("미리보기를 보여줬다", len(shown) == 1 and "[" in shown[0], shown[:1])
+check("모든 음에 가사", sum(1 for n in lyrics.track.notes if not n.lyric), 0)
+check("기록 하나로 남는다", len(window.history), history_before + 1)
+check("기록 이름", window.history.undo_description, "AI 작사")
+check_true("단추가 다시 풀린다", lyrics.ai_button.isEnabled())
+check_true("가사 탭이 새 가사를 보여준다",
+           any(e.editor.toPlainText().strip() for e in lyrics._editors))
+window.undo()
+check("되돌리면 가사가 전부 사라진다", sum(1 for n in lyrics.track.notes if n.lyric), 0)
+check_true("되돌리면 가사 탭도 비워진다",
+           all(not e.editor.toPlainText().strip() for e in lyrics._editors))
+
+# 받는 동안 멜로디가 바뀌면 붙이지 않는다
+slots, payload = main_window_module.prepare_lyrics(project, lyrics.track)
+stale = main_window_module.request_lyrics(slots, payload, main_window_module.default_registry())
+victim = lyrics.track.notes[0]
+window._run(H.RemoveNotes(lyrics.track, [victim], "음 삭제"))
+check_true("멜로디가 바뀐 것을 안다", stale.is_stale(lyrics.track))
+window.undo()
+check_true("되돌리면 다시 맞다", not stale.is_stale(lyrics.track))
+
+print("[15] AI 서비스 설정")
+from myvocal.providers.settings import Settings
+from myvocal.ui.settings_dialog import ProviderSettingsDialog
+
+settings_folder = Path(tempfile.mkdtemp())
+dialog = ProviderSettingsDialog(Settings(settings_folder))
+dialog.show()
+application.processEvents()
+check_true("키 없음 안내", "키가 없습니다" in dialog.source_label.text(),
+           dialog.source_label.text())
+check_true("상태 보고가 보인다", "작사" in dialog.status_view.toPlainText())
+check("키 칸은 가려진다", dialog.key_edit.echoMode(), QtWidgets.QLineEdit.EchoMode.Password)
+dialog.key_edit.setText("sk-ant-ui-test-00000000")
+dialog.model_edit.setText("")
+dialog.use_claude.setChecked(False)
+dialog.save()
+saved = Settings(settings_folder)
+check("저장된 키", saved.api_key("anthropic"), "sk-ant-ui-test-00000000")
+check("작사 우선순위 저장", saved.get("preferred_providers")["lyrics"], "local")
+reopened = ProviderSettingsDialog(saved)
+check_true("다시 열면 가린 키를 보여준다", "0000" in reopened.source_label.text()
+           and "ui-test" not in reopened.source_label.text(), reopened.source_label.text())
+reopened.key_edit.setText("")
+reopened.save()
+check("비우면 키가 지워진다", Settings(settings_folder).has_api_key("anthropic"), False)
+dialog.close()
+reopened.close()
+
+print("[16] 곡 만들기에서 가사까지")
+create = CreateSongDialog()
+check_true("가사 선택 가능", create.check_boxes["lyrics"].isEnabled())
+check_true("가사 기본 선택", create.check_boxes["lyrics"].isChecked())
+from myvocal.ui.app import ComposeWorker
+
+create.description.setPlainText("오래 헤어져 있던 친구를 다시 만나는 이야기")
+create.seed_box.setValue(3)
+results = []
+worker = ComposeWorker(create.to_request(), True, True, True)
+worker.finished_ok.connect(lambda proj, message: results.append((proj, message)))
+worker.start()
+deadline = _time.time() + 120
+while not results and _time.time() < deadline:
+    application.processEvents()
+    _time.sleep(0.01)
+worker.wait(1000)
+check_true("곡이 만들어졌다", bool(results))
+if results:
+    made, message = results[0]
+    vocal = [t for t in made.tracks if t.kind == "vocal"][0]
+    check("만든 곡의 모든 음에 가사", sum(1 for n in vocal.notes if not n.lyric), 0)
+    check_true("주제를 알려준다", "다시 만남" in message, message)
 
 print("\n" + "=" * 62)
 print(f"검증 항목 {checks}개")
