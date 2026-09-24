@@ -122,8 +122,10 @@ signals: list[str] = []
 start.chosen.connect(signals.append)
 start._buttons["auto_song"].click()
 check("눌리면 신호가 온다", signals, ["auto_song"])
-start._buttons["voice_train"].click()
+start._buttons["music_video"].click()
 check("꺼진 단추는 신호가 안 온다", signals, ["auto_song"])
+start._buttons["voice_train"].click()
+check("내 AI 가수 만들기가 켜졌다", signals, ["auto_song", "voice_train"])
 start.set_available("voice_train", True)
 check_true("나중에 켤 수 있다", start._buttons["voice_train"].isEnabled())
 with tempfile.TemporaryDirectory() as folder:
@@ -191,8 +193,12 @@ check_true("실제로 그려졌다", distinct_colors(image) > 60,
 check("트랙 머리 수", len(window.track_panel._headers), len(project.tracks))
 check("구조 목록 항목 수", window.structure_list.count(), len(project.structure))
 check_true("곡 정보가 표시된다", "화면 시험" in window.info_label.text())
-check_true("문제를 알려준다", "목소리 모델" in window.problem_label.text(),
-           f"({window.problem_label.text()})")
+vocal_tracks = [t for t in project.tracks if t.kind == "vocal"]
+check_true("작곡기가 보컬 트랙에 목소리를 지정한다",
+           bool(vocal_tracks) and all(t.voice_model.startswith("preset:") for t in vocal_tracks),
+           f"({[t.voice_model for t in vocal_tracks]})")
+check_true("목소리가 있으니 '목소리 모델 없음' 경고가 없다",
+           "목소리 모델" not in window.problem_label.text(), window.problem_label.text())
 
 print("[5] 트랙을 바꾸면 그 음역이 보인다")
 for track in project.tracks:
@@ -500,6 +506,104 @@ if results:
     vocal = [t for t in made.tracks if t.kind == "vocal"][0]
     check("만든 곡의 모든 음에 가사", sum(1 for n in vocal.notes if not n.lyric), 0)
     check_true("주제를 알려준다", "다시 만남" in message, message)
+
+print("[17] 내 AI 가수 (Voice Studio)")
+import numpy as _np
+from myvocal.ui import voice_studio as studio_module
+from myvocal.voice.library import VoiceLibrary
+from myvocal.voice.phonemes import align_lyrics
+from myvocal.voice.synth import SingingSynth, VoiceTimbre
+from myvocal.voice.analysis import midi_to_hz
+
+
+class FakeRecorder:
+    """마이크 대신 합성한 노래를 돌려준다 (0.1초 늦게 들어온 것처럼)."""
+
+    rate = 24000
+
+    def record(self, exercise):
+        syllables = align_lyrics(exercise.text, [(n.start, n.duration) for n in exercise.notes])
+        audio = SingingSynth(VoiceTimbre.preset("tenor"), self.rate).render(
+            syllables, [midi_to_hz(n.midi) for n in exercise.notes]).data[0] * 0.5
+        return _np.concatenate([_np.zeros(int(0.1 * self.rate)), audio, _np.zeros(self.rate // 2)])
+
+    def play_cues(self, exercise):
+        pass
+
+    @staticmethod
+    def stop():
+        pass
+
+
+studio_module.input_available = lambda: (True, "마이크: 시험용")
+studio_library = VoiceLibrary(Path(tempfile.mkdtemp()))
+studio = studio_module.VoiceStudio(studio_library, recorder=FakeRecorder(), can_apply=True)
+studio.resize(1100, 760)
+studio.show()
+application.processEvents()
+check("처음에는 안내 화면", studio.stack.currentIndex(), 0)
+entry = studio_library.create("MY VOICE", "my_voice", "tenor")
+studio.refresh_list(entry.voice_id)
+application.processEvents()
+check("목소리를 고르면 작업 화면", studio.stack.currentIndex(), 1)
+check_true("처음 연습 안내", "음역 재기" in studio.guidance_label.text(), studio.guidance_label.text())
+check("기본 연습 6개", studio.exercise_box.count(), 6)
+check_true("녹음 단추가 켜져 있다", studio.record_button.isEnabled())
+check_true("모델 단추는 녹음 전엔 꺼져 있다", not studio.build_button.isEnabled())
+studio.exercise_box.setCurrentIndex(1)            # '아' 길게 내기
+studio.record_button.click()
+deadline = _time.time() + 120
+while studio._worker is not None and _time.time() < deadline:
+    application.processEvents()
+    _time.sleep(0.01)
+application.processEvents()
+check("녹음이 저장됐다", len(entry.takes()), 1)
+check_true("결과를 알려준다", "잡았습니다" in studio.take_result.text(), studio.take_result.text())
+check_true("녹음 뒤 부족한 자료 안내로 바뀐다",
+           "부족합니다" in studio.guidance_label.text(), studio.guidance_label.text())
+check_true("자료 표가 채워진다", any(
+    studio.coverage_table.item(r, c).text() != "—"
+    for r in range(3) for c in range(8)))
+check("녹음 목록", studio.take_list.count(), 1)
+check_true("왼쪽 목록도 녹음 수가 바뀐다", "녹음 1개" in studio.voice_list.item(0).text(),
+           studio.voice_list.item(0).text())
+check_true("모델 단추가 켜진다", studio.build_button.isEnabled())
+grab = studio.grab()
+grab.save(str(Path(tempfile.gettempdir()) / "voice_studio_test.png"))
+check_true("화면이 실제로 그려졌다", distinct_colors(grab.toImage()) > 40)
+
+studio.build_model()
+deadline = _time.time() + 300
+while studio._worker is not None and _time.time() < deadline:
+    application.processEvents()
+    _time.sleep(0.02)
+application.processEvents()
+check_true("모델이 만들어졌다", entry.model() is not None)
+check_true("분석 결과가 보인다", "음역" in studio.report_view.toPlainText())
+check_true("적용 단추가 켜진다", studio.apply_button.isEnabled())
+chosen = []
+studio.voice_chosen.connect(lambda ref, style: chosen.append((ref, style)))
+studio.style_box.setCurrentIndex(studio.style_box.findData("rock"))
+studio.apply_button.click()
+check("보컬 트랙에 쓰기 신호", chosen, [(f"user:{entry.voice_id}", "rock")])
+
+# 편집기에서 적용하면 실행 취소 한 번에 둘 다 돌아간다
+import myvocal.voice.library as _library_module
+_original = _library_module.voices_folder
+_library_module.voices_folder = lambda: studio_library.folder
+try:
+    vocal = [t for t in window.project.tracks if t.kind == "vocal"][0]
+    before = (vocal.voice_model, vocal.singing_style)
+    window.apply_voice(f"user:{entry.voice_id}", "rock")
+    check("목소리·창법 적용", (vocal.voice_model, vocal.singing_style), (f"user:{entry.voice_id}", "rock"))
+    header = [h for h in window.track_panel._headers if h.track is vocal][0]
+    check_true("트랙 머리에 목소리 이름", "MY VOICE" in header.instrument_label.text()
+               and "Rock" in header.instrument_label.text(), header.instrument_label.text())
+    window.undo()
+    check("실행 취소로 둘 다 돌아간다", (vocal.voice_model, vocal.singing_style), before)
+finally:
+    _library_module.voices_folder = _original
+studio.close()
 
 print("\n" + "=" * 62)
 print(f"검증 항목 {checks}개")

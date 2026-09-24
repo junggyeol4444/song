@@ -117,6 +117,8 @@ class Shell(QtWidgets.QMainWindow):
     def _on_menu_chosen(self, key: str) -> None:
         if key == "auto_song":
             self.create_song()
+        elif key == "voice_train":
+            self.open_voice_studio()
         elif key == "compose":
             self.open_editor(Project("새 프로젝트"))
         elif key == "open":
@@ -167,6 +169,18 @@ class Shell(QtWidgets.QMainWindow):
             self._progress.close()
             self._progress = None
         QtWidgets.QMessageBox.critical(self, "곡을 만들 수 없습니다", message)
+
+    def open_voice_studio(self) -> None:
+        from .voice_studio import VoiceStudio
+
+        if getattr(self, "voice_studio", None) is None:
+            self.voice_studio = VoiceStudio(palette=self._palette)
+            self.voice_studio.back_requested.connect(
+                lambda: self.stack.setCurrentWidget(self.start_screen))
+            self.stack.addWidget(self.voice_studio)
+        else:
+            self.voice_studio.refresh_list()
+        self.stack.setCurrentWidget(self.voice_studio)
 
     def open_project_dialog(self) -> None:
         folder = default_project_folder()

@@ -60,34 +60,66 @@ class VoiceTimbre:
     tension: float = 0.5
     brightness: float = 0.0        # -1 어두움 ~ +1 밝음
     vibrato_rate: float = 5.4      # Hz
-    vibrato_depth: float = 28.0    # 센트
+    vibrato_depth: float = 28.0    # 센트 (사인파 진폭)
     vibrato_onset: float = 0.32    # 초
     portamento: float = 0.045      # 앞 음에서 미끄러져 오는 시간(초)
+    scoop_cents: float = 0.0       # 음 시작을 이만큼 아래(음수)/위에서 시작해 올라간다
+    scoop_time: float = 0.08       # 스쿱이 목표 음에 닿는 데 걸리는 시간(초)
+    roughness: float = 0.0         # 거칠기 (음높이·세기의 미세한 흔들림). 록 창법
+    falsetto_from_hz: float = 0.0  # 이 음높이 이상은 가성으로 부른다. 0 이면 안 씀
+    # 이 사람이 실제로 낸 모음 포먼트. (모음, F1, F2, F3). 있으면 성도 배율 대신 쓴다.
+    vowel_formants: tuple[tuple[str, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
         if not (0.5 <= self.formant_scale <= 1.6):
             raise VoiceError(f"성도 배율은 0.5~1.6 이어야 합니다: {self.formant_scale}")
-        for label, value in (("breathiness", self.breathiness), ("tension", self.tension)):
+        for label, value in (("breathiness", self.breathiness), ("tension", self.tension),
+                             ("roughness", self.roughness)):
             if not (0.0 <= value <= 1.0):
                 raise VoiceError(f"{label} 은 0~1 이어야 합니다: {value}")
         if self.vibrato_depth < 0:
             raise VoiceError("비브라토 깊이는 0 이상이어야 합니다.")
+        if self.falsetto_from_hz < 0:
+            raise VoiceError("가성 시작 음높이는 0 이상이어야 합니다.")
+        for entry in self.vowel_formants:
+            if len(entry) != 4 or not (0 < entry[1] < entry[2] < entry[3]):
+                raise VoiceError(f"모음 포먼트가 잘못됐습니다: {entry}")
+
+    @property
+    def formant_factor(self) -> float:
+        """포먼트에 곱할 값. 성도가 길수록(배율이 클수록) 포먼트는 낮아진다.
+
+        관 공명의 주파수는 관 길이에 반비례한다. 남성의 성도가 여성보다 길어서
+        같은 모음이라도 포먼트가 15~20% 낮다.
+        """
+        return 1.0 / self.formant_scale
+
+    def formants_for(self, vowel: str, reference: tuple[float, float, float]
+                     ) -> tuple[float, float, float]:
+        """이 목소리가 이 모음을 낼 때의 포먼트."""
+        for symbol, f1, f2, f3 in self.vowel_formants:
+            if symbol == vowel:
+                return (f1, f2, f3)
+        factor = self.formant_factor
+        return (reference[0] * factor, reference[1] * factor, reference[2] * factor)
 
     @classmethod
     def preset(cls, name: str) -> "VoiceTimbre":
         """대표적인 목소리. 학습 전에 고를 수 있게 한다."""
+        # 성도 배율: 표의 모음 포먼트(성인 평균에 가까운 값)를 기준 1로 본다.
+        # 소프라노와 베이스의 포먼트 비가 1.36 배쯤 되게 잡았다.
         table = {
-            "soprano": dict(formant_scale=0.86, breathiness=0.14, tension=0.55,
+            "soprano": dict(formant_scale=0.88, breathiness=0.14, tension=0.55,
                             brightness=0.25, vibrato_rate=5.8, vibrato_depth=34.0),
-            "mezzo": dict(formant_scale=0.92, breathiness=0.16, tension=0.5,
+            "mezzo": dict(formant_scale=0.93, breathiness=0.16, tension=0.5,
                           brightness=0.1, vibrato_rate=5.5, vibrato_depth=30.0),
             "alto": dict(formant_scale=0.97, breathiness=0.18, tension=0.45,
                          brightness=0.0, vibrato_rate=5.2, vibrato_depth=26.0),
-            "tenor": dict(formant_scale=1.08, breathiness=0.15, tension=0.55,
+            "tenor": dict(formant_scale=1.07, breathiness=0.15, tension=0.55,
                           brightness=0.05, vibrato_rate=5.4, vibrato_depth=28.0),
-            "baritone": dict(formant_scale=1.16, breathiness=0.16, tension=0.45,
+            "baritone": dict(formant_scale=1.13, breathiness=0.16, tension=0.45,
                              brightness=-0.1, vibrato_rate=5.0, vibrato_depth=24.0),
-            "bass": dict(formant_scale=1.26, breathiness=0.18, tension=0.4,
+            "bass": dict(formant_scale=1.20, breathiness=0.18, tension=0.4,
                          brightness=-0.2, vibrato_rate=4.8, vibrato_depth=22.0),
             "whisper": dict(formant_scale=0.95, breathiness=0.85, tension=0.25,
                             brightness=0.15, vibrato_depth=8.0),
@@ -101,7 +133,8 @@ class VoiceTimbre:
         return cls(name=name, **table[name])
 
 
-def glottal_pulse(phase: np.ndarray, tension: float = 0.5) -> np.ndarray:
+def glottal_pulse(phase: np.ndarray, tension: float = 0.5,
+                  falsetto: bool = False) -> np.ndarray:
     """성대가 여닫히는 파형 (Rosenberg 모형).
 
     단순한 톱니나 사각파를 쓰면 안 된다. 성대의 실제 움직임은 '천천히 열리고
@@ -111,6 +144,13 @@ def glottal_pulse(phase: np.ndarray, tension: float = 0.5) -> np.ndarray:
     tension 이 높으면 닫히는 순간이 빨라져 배음이 늘고 날카로워진다.
     """
     normalized = (phase / (2.0 * np.pi)) % 1.0
+    if falsetto:
+        # 가성은 성대 가장자리만 얇게 떨고 완전히 닫히지 않는다. 성문 흐름이
+        # 사인파에 가깝고 배음이 적다 (첫 배음이 둘째보다 10~20dB 크다).
+        # 사인 성분 85% 에 보통 파형 15% 를 섞는다.
+        sine = 0.5 * (1.0 - np.cos(2.0 * np.pi * normalized))
+        modal = glottal_pulse(phase, 0.2)
+        return 0.85 * (sine - sine.mean()) + 0.15 * modal
     open_phase = 0.46 - 0.12 * tension       # 열리는 구간
     close_phase = 0.20 - 0.09 * tension      # 닫히는 구간
     result = np.zeros_like(normalized)
@@ -179,7 +219,7 @@ class SingingSynth:
         찍어 놓고 부드럽게 잇는다.
         """
         rate = self.sample_rate
-        scale = self.timbre.formant_scale
+        scale = self.timbre.formant_factor
 
         formants = np.zeros((3, total_frames))
         amplitude = np.zeros(total_frames)
@@ -206,9 +246,10 @@ class SingingSynth:
                 f1, f2, f3 = phoneme.formants
 
                 if phoneme.kind is PhonemeKind.VOWEL:
-                    formants[0, span] = f1 * scale
-                    formants[1, span] = f2 * scale
-                    formants[2, span] = f3 * scale
+                    f1, f2, f3 = self.timbre.formants_for(phoneme.symbol, (f1, f2, f3))
+                    formants[0, span] = f1
+                    formants[1, span] = f2
+                    formants[2, span] = f3
                     amplitude[span] = 1.0
                     voicing[span] = 1.0
                     noise_level[span] = self.timbre.breathiness * 0.35
@@ -293,6 +334,7 @@ class SingingSynth:
 
         glide_frames = max(1, int(self.timbre.portamento * rate))
         previous_hz = pitches_hz[0]
+        previous_end = -10 ** 9
         for syllable, target_hz in zip(syllables, pitches_hz):
             start = max(0, int(round(syllable.note_start * rate)))
             end = min(total_frames, int(round(
@@ -302,7 +344,11 @@ class SingingSynth:
                 continue
             length = end - start
             glide = min(glide_frames, length)
-            if abs(previous_hz - target_hz) > 0.5 and glide > 1:
+            # 쉬었다가 새로 들어가는 음은 앞 음에서 미끄러져 오지 않는다.
+            # 포르타멘토는 음이 이어질 때(틈 50ms 미만)만 생긴다.
+            connected = start - previous_end < int(0.05 * rate)
+            previous_end = end
+            if connected and abs(previous_hz - target_hz) > 0.5 and glide > 1:
                 # 음높이는 로그로 들리므로 지수 보간이 자연스럽다
                 progress = np.linspace(0.0, 1.0, glide)
                 eased = progress * progress * (3.0 - 2.0 * progress)
@@ -322,6 +368,32 @@ class SingingSynth:
                 filled[index] = last
             else:
                 last = filled[index]
+
+        # 스쿱. 쉬었다가 새로 들어가는 음을 아래(또는 위)에서 밀어 올려 잡는다.
+        # 이어지는 음은 포르타멘토가 이미 미끄러지므로 건드리지 않는다.
+        if abs(self.timbre.scoop_cents) > 0.5:
+            scoop_frames = max(1, int(self.timbre.scoop_time * rate))
+            previous_end = -10 ** 9
+            for syllable in syllables:
+                start = max(0, int(round(syllable.note_start * rate)))
+                end = min(total_frames, int(round(
+                    (syllable.note_start + syllable.note_duration) * rate)))
+                if end > start and start - previous_end > int(0.05 * rate):
+                    length = min(scoop_frames, end - start)
+                    progress = np.linspace(0.0, 1.0, length)
+                    eased = progress * progress * (3.0 - 2.0 * progress)
+                    filled[start:start + length] *= np.power(
+                        2.0, self.timbre.scoop_cents * (1.0 - eased) / 1200.0)
+                previous_end = max(previous_end, end)
+
+        # 거칠기. 음높이가 아주 빠르게 조금씩 흔들린다 (지터). 록·그로울 창법의 성질.
+        if self.timbre.roughness > 0.0:
+            jitter_generator = np.random.default_rng(777)
+            raw = jitter_generator.standard_normal(total_frames)
+            sos = scipy_signal.butter(2, 35.0, btype="lowpass", fs=rate, output="sos")
+            wobble = scipy_signal.sosfilt(sos, raw)
+            wobble /= max(1e-12, float(np.std(wobble)))
+            filled = filled * np.power(2.0, wobble * self.timbre.roughness * 18.0 / 1200.0)
 
         # 비브라토. 음이 시작하자마자 걸리지 않고 조금 늦게 들어온다.
         time = np.arange(total_frames) / rate
@@ -378,6 +450,21 @@ class SingingSynth:
         # --- 성대 소리 ---
         phase = phase_from_frequency(pitch, total_frames, rate)
         source = glottal_pulse(phase, self.timbre.tension)
+        falsetto = self._falsetto_mask(syllables, pitches_hz, total_frames)
+        if falsetto.any():
+            # 가성 음에서는 성대 파형이 바뀌고 숨이 더 섞인다
+            source = source * (1.0 - falsetto) + glottal_pulse(phase, falsetto=True) * falsetto
+            # 가성의 숨은 조금만. 가성은 배음이 약해서 잡음을 조금만 넣어도 모음 공명에서
+            # 부푼 잡음이 배음과 맞먹게 되고, 음높이가 흐려진다.
+            tracks["noise"] = tracks["noise"] + 0.04 * falsetto * tracks["voicing"]
+        if self.timbre.roughness > 0.0:
+            # 세기의 미세한 흔들림 (쉼머)
+            shimmer_generator = np.random.default_rng(778)
+            raw = shimmer_generator.standard_normal(total_frames)
+            sos = scipy_signal.butter(2, 40.0, btype="lowpass", fs=rate, output="sos")
+            shimmer = scipy_signal.sosfilt(sos, raw)
+            shimmer /= max(1e-12, float(np.std(shimmer)))
+            source = source * (1.0 + 0.18 * self.timbre.roughness * shimmer)
         source *= tracks["voicing"]
 
         # --- 바람 소리 ---
@@ -399,7 +486,7 @@ class SingingSynth:
         states = [np.zeros(2) for _ in range(5)]
         noise_state = np.zeros(2)
         fricative_state = np.zeros(2)
-        scale = self.timbre.formant_scale
+        scale = self.timbre.formant_factor
 
         for begin in range(0, total_frames, self.BLOCK):
             end = min(begin + self.BLOCK, total_frames)
@@ -491,6 +578,24 @@ class SingingSynth:
             squeezed = knee + (1.0 - knee) * np.tanh((magnitude[over] - knee) / (1.0 - knee))
             result[over] = np.sign(result[over]) * squeezed * 0.98
         return result
+
+    def _falsetto_mask(self, syllables: Sequence[SungSyllable], pitches_hz: Sequence[float],
+                       total_frames: int) -> np.ndarray:
+        """가성으로 부를 구간 (0~1). 기준 음높이 이상인 음이 1 이다."""
+        mask = np.zeros(total_frames)
+        threshold = self.timbre.falsetto_from_hz
+        if threshold <= 0:
+            return mask
+        rate = self.sample_rate
+        for syllable, hz in zip(syllables, pitches_hz):
+            if hz < threshold:
+                continue
+            start = max(0, int(round((syllable.note_start + syllable.onset_offset) * rate)))
+            end = min(total_frames, int(round(
+                (syllable.note_start + syllable.note_duration) * rate)))
+            mask[start:end] = 1.0
+        width = max(1, int(0.02 * rate))
+        return np.convolve(mask, np.ones(width) / width, mode="same")
 
     # 노래하는 모음의 목표 크기 (RMS). -14 dBFS 쯤이다. 반주 악기 한 대와
     # 비슷한 크기라서, 믹스에서 보컬이 묻히지 않는다.

@@ -16,6 +16,22 @@ from ..music.instruments import available_instruments, create_instrument
 from .theme import DARK, Palette, track_color
 
 
+def voice_label(track: Track) -> str:
+    """보컬 트랙에 보여줄 '누가 · 어떻게'."""
+    from ..voice.library import resolve_voice
+    from ..voice.model import SINGING_STYLES, preset_voices
+
+    reference, style = track.voice_model, track.singing_style or "natural"
+    if not reference and style in preset_voices():
+        reference, style = style, "natural"
+    try:
+        name = resolve_voice(reference).name
+    except Exception:
+        name = "목소리 없음"
+    style_name = SINGING_STYLES[style].display_name if style in SINGING_STYLES else style
+    return f"{name} · {style_name}"
+
+
 class TrackHeader(QtWidgets.QFrame):
     """트랙 한 줄."""
 
@@ -93,6 +109,8 @@ class TrackHeader(QtWidgets.QFrame):
         self.volume_slider.valueChanged.connect(self._on_volume)
 
     def _instrument_text(self) -> str:
+        if self.track.kind == "vocal":
+            return f"{voice_label(self.track)} · 음 {len(self.track.notes)}개"
         try:
             info = create_instrument(self.track.instrument).info
             name = info.display_name
@@ -151,10 +169,39 @@ class TrackHeader(QtWidgets.QFrame):
             except Exception:
                 label = name
             actions[instrument_menu.addAction(label)] = name
+        voice_actions: dict = {}
+        style_actions: dict = {}
+        if self.track.kind == "vocal":
+            from ..voice.library import VoiceLibrary
+            from ..voice.model import SINGING_STYLES, preset_voices
+
+            voice_menu = menu.addMenu("목소리 바꾸기")
+            try:
+                entries = VoiceLibrary().entries()
+            except OSError:
+                entries = []
+            for entry in entries:
+                if entry.model() is not None:
+                    action = voice_menu.addAction(f"🎤 {entry.name}")
+                    voice_actions[action] = f"user:{entry.voice_id}"
+            if voice_actions:
+                voice_menu.addSeparator()
+            for key, model in preset_voices().items():
+                voice_actions[voice_menu.addAction(model.name)] = f"preset:{key}"
+            style_menu = menu.addMenu("창법 바꾸기")
+            for style in SINGING_STYLES.values():
+                action = style_menu.addAction(f"{style.display_name} — {style.description}")
+                style_actions[action] = style.name
         menu.addSeparator()
         delete = menu.addAction("트랙 삭제")
         chosen = menu.exec(event.globalPos())
         if chosen is None:
+            return
+        if chosen in voice_actions:
+            self.property_changed.emit(self.track, "voice_model", voice_actions[chosen])
+            return
+        if chosen in style_actions:
+            self.property_changed.emit(self.track, "singing_style", style_actions[chosen])
             return
         if chosen is rename:
             text, ok = QtWidgets.QInputDialog.getText(

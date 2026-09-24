@@ -21,7 +21,34 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..music.genre import GENRES, GenreBlend, available_genres, get_genre
 from ..music.melody import VocalRange
 from ..music.theory import Key
+from ..voice.model import SINGING_STYLES
 from .theme import DARK, Palette
+
+
+def fill_voice_box(box: QtWidgets.QComboBox, selected: str = "") -> None:
+    """목소리 고르는 칸을 채운다. 학습한 내 목소리가 먼저, 그 다음 기본 목소리."""
+    from ..voice.library import VoiceLibrary
+    from ..voice.model import preset_voices
+
+    box.clear()
+    try:
+        entries = VoiceLibrary().entries()
+    except OSError:
+        entries = []
+    for entry in entries:
+        model = entry.model()
+        if model is not None:
+            box.addItem(f"🎤 {entry.name} · {model.range_text().split(' (')[0]}",
+                        f"user:{entry.voice_id}")
+            box.setItemData(box.count() - 1, model.range_text(), QtCore.Qt.ItemDataRole.ToolTipRole)
+    labels = {"soprano": "높은 여성", "mezzo": "중간 여성", "alto": "낮은 여성",
+              "tenor": "높은 남성", "baritone": "중간 남성", "bass": "낮은 남성"}
+    for key, model in preset_voices().items():
+        box.addItem(f"{model.name} ({labels[key]})", f"preset:{key}")
+    index = box.findData(selected) if selected else -1
+    if index < 0:
+        index = box.findData("preset:mezzo") if not entries else 0
+    box.setCurrentIndex(max(0, index))
 
 
 class GenreMixRow(QtWidgets.QWidget):
@@ -160,20 +187,26 @@ class CreateSongDialog(QtWidgets.QDialog):
         settings.addStretch(1)
         form.addRow("", settings)
 
-        # --- 목소리 ---
+        # --- 목소리 (누가) 와 창법 (어떻게) ---
         self.voice_box = QtWidgets.QComboBox()
-        self.voice_box.addItem("소프라노 (높은 여성)", "soprano")
-        self.voice_box.addItem("메조 (중간 여성)", "mezzo")
-        self.voice_box.addItem("알토 (낮은 여성)", "alto")
-        self.voice_box.addItem("테너 (높은 남성)", "tenor")
-        self.voice_box.addItem("바리톤 (중간 남성)", "baritone")
-        self.voice_box.addItem("베이스 (낮은 남성)", "bass")
-        self.voice_box.setCurrentIndex(1)
-        form.addRow("음역", self.voice_box)
+        self.style_box = QtWidgets.QComboBox()
+        fill_voice_box(self.voice_box)
+        for index, style in enumerate(SINGING_STYLES.values()):
+            self.style_box.addItem(f"창법: {style.display_name}", style.name)
+            self.style_box.setItemData(index, style.description, QtCore.Qt.ItemDataRole.ToolTipRole)
+        # 글자가 긴 항목이 칸의 최소 폭을 키워서 옆의 이름표를 밀어내지 않게 한다
+        for box in (self.voice_box, self.style_box):
+            box.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(8)
+        voice_row = QtWidgets.QHBoxLayout()
+        voice_row.addWidget(self.voice_box, 3)
+        voice_row.addWidget(self.style_box, 2)
+        form.addRow("목소리", voice_row)
 
         voice_note = QtWidgets.QLabel(
-            "내 목소리로 부르게 하려면 목소리 학습이 필요합니다. 아직 만들고 있습니다.\n"
-            "지금은 멜로디만 코러스 음색으로 나옵니다."
+            "내 목소리를 쓰려면 시작 화면의 '내 AI 가수 만들기' 에서 먼저 녹음하고 학습하세요.\n"
+            "멜로디는 고른 목소리의 음역 안에서 만듭니다."
         )
         voice_note.setObjectName("Faint")
         voice_note.setWordWrap(True)
@@ -191,8 +224,8 @@ class CreateSongDialog(QtWidgets.QDialog):
             ("arrangement", "편곡 (베이스·드럼·반주)", True, True, ""),
             ("lyrics", "가사", True, True,
              "멜로디에 맞춰 가사를 씁니다. API 키가 있으면 Claude, 없으면 내장 규칙."),
-            ("singing", "내 목소리로 노래", False, False,
-             "목소리 학습(6번)이 아직 없습니다. 지금은 가사가 있으면 기본 합성 목소리로 부릅니다."),
+            ("singing", "고른 목소리로 노래", True, False,
+             "가사가 있으면 위에서 고른 목소리와 창법으로 부릅니다."),
             ("mix", "믹싱", True, True, ""),
             ("master", "마스터링", True, True, ""),
             ("storyboard", "장면 구성", False, False, "영상은 아직 만들고 있습니다."),
@@ -350,7 +383,8 @@ class CreateSongDialog(QtWidgets.QDialog):
             bpm=None if self.bpm_auto.isChecked() else float(self.bpm_box.value()),
             subject=description,
             final_chorus_note=final_note,
-            vocal_range=VocalRange.typical(self.voice_box.currentData()),
+            voice_model=self.voice_box.currentData(),
+            singing_style=self.style_box.currentData(),
             seed=seed,
         )
 

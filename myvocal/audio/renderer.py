@@ -29,7 +29,7 @@ from ..core.notes import Note
 from ..core.project import Project
 from ..core.tracks import Track
 from ..core.units import TempoMap
-from ..music.theory import midi_to_frequency
+from ..music.theory import Pitch, midi_to_frequency
 from ..music.instruments import (
     DRUM_NOTES, DrumKit, Instrument, InstrumentError, create_instrument,
 )
@@ -57,6 +57,7 @@ class RenderOptions:
     velocity_quantize: int = 8       # 세기를 이 단위로 묶어 캐시 적중률을 높인다
     duration_quantize_ms: float = 25.0
     sing_lyrics: bool = True         # 가사가 있는 보컬 트랙을 실제로 부르게 한다
+    voice_library: object | None = None   # 내 목소리를 찾을 라이브러리 (None 이면 기본 위치)
 
     def __post_init__(self) -> None:
         if self.sample_rate < 8000:
@@ -186,6 +187,7 @@ class Renderer:
 
     def __init__(self, options: RenderOptions | None = None) -> None:
         self.options = options or RenderOptions()
+        self._last_voice = None
         self.cache = NoteCache()
         self._instruments: dict[str, Instrument] = {}
 
@@ -198,6 +200,31 @@ class Renderer:
         return self._instruments[name]
 
     # ------------------------------------------------------------------
+
+    def vocal_timbre(self, track: Track, warnings: list[str]) -> VoiceTimbre:
+        """트랙의 목소리(누구) + 창법(어떻게) 을 합성기 설정으로 (7번).
+
+        예전 프로젝트는 singing_style 에 'mezzo' 같은 목소리 이름이 들어 있었다.
+        그런 경우는 그것을 목소리로 읽는다.
+        """
+        from ..voice.library import VoiceLibrary, resolve_voice
+        from ..voice.model import SINGING_STYLES, preset_voices
+
+        reference = track.voice_model
+        style = track.singing_style or "natural"
+        if not reference and style in preset_voices():
+            reference, style = style, "natural"
+        if style not in SINGING_STYLES:
+            warnings.append(f"'{track.name}': 모르는 창법 '{style}' 이라 Natural 로 불렀습니다.")
+            style = "natural"
+        library = self.options.voice_library
+        try:
+            voice = resolve_voice(reference, library if isinstance(library, VoiceLibrary) else None)
+        except VoiceError as error:
+            warnings.append(f"'{track.name}': {error} 기본 목소리로 불렀습니다.")
+            voice = preset_voices()["mezzo"]
+        self._last_voice = voice
+        return voice.timbre(style)
 
     def render_vocal(
         self, track: Track, tempo: TempoMap, total_frames: int,
@@ -220,14 +247,17 @@ class Renderer:
                 f"부르지 않았습니다."
             )
 
-        preset = track.singing_style or "mezzo"
-        try:
-            timbre = VoiceTimbre.preset(preset)
-        except VoiceError:
-            timbre = VoiceTimbre.preset("mezzo")
-            warnings.append(
-                f"'{track.name}': 모르는 목소리 '{preset}' 이라 기본값으로 불렀습니다."
-            )
+        timbre = self.vocal_timbre(track, warnings)
+        voice = self._last_voice
+        if voice is not None:
+            low = min(n.midi for n in notes)
+            high = max(n.midi for n in notes)
+            vocal = voice.vocal_range()
+            if low < vocal.lowest or high > vocal.highest:
+                warnings.append(
+                    f"'{track.name}': 멜로디({Pitch.from_midi(low)}~{Pitch.from_midi(high)})가 "
+                    f"'{voice.name}' 의 음역({voice.range_text()})을 벗어납니다."
+                )
 
         text = "".join(n.lyric for n in notes)
         note_times = [

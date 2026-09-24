@@ -254,7 +254,7 @@ for vowel, (want1, want2) in (
 ):
     audio = sing(vowel, [(0.0, 1.0)], [110.0], timbre)
     peaks = envelope_peaks(audio.data[0][int(0.25 * RATE):int(0.9 * RATE)])
-    target = want2 * scale
+    target = want2 / scale
     near = [p for p in peaks if abs(p - target) < target * 0.25]
     check_true(f"'{vowel}' 의 F2 가 {target:.0f}Hz 근처", bool(near),
                f"(찾은 봉우리 {[f'{p:.0f}' for p in peaks[:5]]})")
@@ -275,16 +275,24 @@ check_true("'아'와 '우'도 다르다",
            float(np.abs(a_spectrum - u_spectrum).sum()) > 0.3)
 
 print("[10] 목소리 종류 — 성도 배율이 포먼트를 옮긴다")
+measured_f2: dict[str, float] = {}
 for preset in ("soprano", "mezzo", "alto", "tenor", "baritone", "bass"):
     voice = VoiceTimbre.preset(preset)
     audio = sing("이", [(0.0, 1.0)], [110.0], voice)
     peaks = envelope_peaks(audio.data[0][int(0.25 * RATE):int(0.9 * RATE)])
-    target = 2700.0 * voice.formant_scale
+    target = 2700.0 / voice.formant_scale
     near = [p for p in peaks if abs(p - target) < target * 0.35]
     found = min(near, key=lambda p: abs(p - target)) if near else 0.0
     error = abs(found - target) / target if found else 1.0
     check_true(f"{preset}: F2 가 {target:.0f}Hz 근처", error < 0.15,
                f"(실측 {found:.0f}Hz, 오차 {error * 100:.1f}%)")
+    measured_f2[preset] = found
+# 물리: 성도가 긴 목소리(베이스)는 포먼트가 낮다. 예전 코드는 이것이 거꾸로였다.
+check_true("베이스의 포먼트가 소프라노보다 낮다",
+           0 < measured_f2["bass"] < measured_f2["soprano"],
+           f"(베이스 {measured_f2['bass']:.0f}Hz, 소프라노 {measured_f2['soprano']:.0f}Hz)")
+check_true("테너가 메조보다 낮다", 0 < measured_f2["tenor"] < measured_f2["mezzo"],
+           f"(테너 {measured_f2['tenor']:.0f}, 메조 {measured_f2['mezzo']:.0f})")
 check_raises("모르는 목소리 거부", lambda: VoiceTimbre.preset("bogus"), VoiceError)
 check_raises("성도 배율 범위 초과", lambda: VoiceTimbre(formant_scale=3.0), VoiceError)
 check_raises("숨소리 범위 초과", lambda: VoiceTimbre(breathiness=2.0), VoiceError)

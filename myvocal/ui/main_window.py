@@ -319,6 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tools_menu = bar.addMenu("도구")
         self._action(tools_menu, "AI 작사", "Ctrl+L", self.request_ai_lyrics)
+        self._action(tools_menu, "내 AI 가수 (목소리 학습)...", "", self.show_voice_studio)
         tools_menu.addSeparator()
         self._action(tools_menu, "AI 서비스 설정...", "", self.show_provider_settings)
 
@@ -555,6 +556,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lyrics_panel.set_busy(False)
         QtWidgets.QMessageBox.critical(self, "작사하지 못했습니다", message)
         self.status.showMessage("작사 실패", 4000)
+
+    def show_voice_studio(self) -> None:
+        """목소리 학습 창. 만든 목소리를 이 곡의 보컬 트랙에 바로 쓸 수 있다."""
+        from .voice_studio import VoiceStudio
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("내 AI 가수 — MYVOCAL Studio")
+        dialog.resize(1100, 760)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        studio = VoiceStudio(palette=self._palette, can_apply=True, parent=dialog)
+        studio.back_requested.connect(dialog.close)
+        studio.voice_chosen.connect(lambda ref, style: (self.apply_voice(ref, style), dialog.close()))
+        layout.addWidget(studio)
+        dialog.exec()
+
+    def apply_voice(self, reference: str, style: str) -> None:
+        """보컬 트랙의 목소리와 창법을 바꾼다. 실행 취소 한 번에 둘 다 돌아간다."""
+        vocals = [t for t in self.project.tracks if t.kind == "vocal"]
+        if not vocals:
+            QtWidgets.QMessageBox.information(self, "보컬 트랙 없음", "이 곡에는 보컬 트랙이 없습니다.")
+            return
+        track = self.piano_roll.track if self.piano_roll.track in vocals else vocals[0]
+        self._run(H.CompositeCommand([
+            H.SetTrackProperty(track, "voice_model", reference),
+            H.SetTrackProperty(track, "singing_style", style),
+        ], f"'{track.name}' 목소리 바꾸기"))
+        self.track_panel.refresh()
+        self.status.showMessage(f"'{track.name}' 의 목소리를 바꿨습니다. F5 를 누르면 그 목소리로 부릅니다.", 6000)
 
     def show_provider_settings(self) -> None:
         from .settings_dialog import ProviderSettingsDialog

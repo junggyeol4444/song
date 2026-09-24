@@ -82,6 +82,8 @@ class SongRequest:
     repeat_final_chorus: bool = False
     seed: int | None = None
     time_signature: str = "4/4"
+    voice_model: str = ""               # 'preset:mezzo' / 'user:<번호>'. 비면 음역에 맞는 기본 목소리
+    singing_style: str = ""             # 'ballad', 'rock' ... (7번). 비면 Natural
 
     def resolved_genre(self) -> GenreBlend:
         return self.genre if isinstance(self.genre, GenreBlend) else GenreBlend.parse(self.genre)
@@ -190,7 +192,17 @@ class Composer:
         self.random = random.Random(request.seed)
         self.blend = request.resolved_genre()
         self.profile = self.blend.resolve()
-        self.vocal_range = request.vocal_range or VocalRange.typical("alto")
+        # 목소리를 골랐으면 그 사람이 부를 수 있는 음역에서 멜로디를 만든다
+        self.voice_model = request.voice_model
+        if request.vocal_range is not None:
+            self.vocal_range = request.vocal_range
+        elif request.voice_model:
+            from ..voice.library import resolve_voice
+            self.vocal_range = resolve_voice(request.voice_model).vocal_range()
+        else:
+            self.vocal_range = VocalRange.typical("alto")
+        if not self.voice_model:
+            self.voice_model = f"preset:{nearest_preset(self.vocal_range)}"
 
         if request.key is not None:
             self.key = request.key if isinstance(request.key, Key) else Key.parse(request.key)
@@ -279,7 +291,11 @@ class Composer:
                 "리드 보컬", "vocal", instrument="choir",
                 volume_db=ROLE_MIX["vocal"][0], pan=ROLE_MIX["vocal"][1],
                 generated_by="ai_composer",
+                voice_model=self.voice_model,
+                singing_style=self.request.singing_style,
             )
+            if self.voice_model.startswith("user:"):
+                project.add_asset("voice", self.voice_model[5:], role="lead_vocal")
 
         # 같은 종류의 구간은 선율도 같아야 한다. 후렴 선율이 매번 다르면
         # 후렴이 아니고, 같은 가사를 다시 부를 수도 없다 (음 개수가 달라지니까).
@@ -342,6 +358,12 @@ class Composer:
                 track.add_notes(_clip_to_span(notes, start_tick, span.end_tick))
 
         return project
+
+
+def nearest_preset(vocal: VocalRange) -> str:
+    """음역 가운데가 가장 가까운 기본 목소리."""
+    names = ("soprano", "mezzo", "alto", "tenor", "baritone", "bass")
+    return min(names, key=lambda n: abs(VocalRange.typical(n).center - vocal.center))
 
 
 def _instrument_label(instrument: str) -> str:
