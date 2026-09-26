@@ -110,6 +110,12 @@ class Shell(QtWidgets.QMainWindow):
         self.stack.addWidget(self.start_screen)
 
         self.editor: MainWindow | None = None
+        # 학습실에서 만든 '내 스타일' 을 장르 목록에 올린다 (8번)
+        try:
+            from ..learning.library import MusicLibrary
+            MusicLibrary().register_all()
+        except Exception:
+            pass
         self._progress: QtWidgets.QProgressDialog | None = None
 
     # ---------------------------------------------------------------- 흐름
@@ -119,6 +125,8 @@ class Shell(QtWidgets.QMainWindow):
             self.create_song()
         elif key == "voice_train":
             self.open_voice_studio()
+        elif key == "learning":
+            self.open_learning_studio()
         elif key == "compose":
             self.open_editor(Project("새 프로젝트"))
         elif key == "open":
@@ -129,8 +137,28 @@ class Shell(QtWidgets.QMainWindow):
             reason = entry.entry.unavailable_reason if entry else "아직 만들고 있습니다."
             QtWidgets.QMessageBox.information(self, "아직 준비 중", reason)
 
-    def create_song(self) -> None:
+    def open_learning_studio(self) -> None:
+        from .learning_studio import LearningStudio
+
+        if getattr(self, "learning_studio", None) is None:
+            self.learning_studio = LearningStudio(palette=self._palette)
+            self.learning_studio.back_requested.connect(
+                lambda: self.stack.setCurrentWidget(self.start_screen))
+            self.learning_studio.create_with_genre.connect(
+                lambda name: self.create_song(genre=name))
+            self.learning_studio.create_with_reference.connect(
+                lambda hints: self.create_song(reference=hints))
+            self.stack.addWidget(self.learning_studio)
+        else:
+            self.learning_studio.refresh()
+        self.stack.setCurrentWidget(self.learning_studio)
+
+    def create_song(self, genre: str | None = None, reference=None) -> None:
         dialog = CreateSongDialog(self._palette, self)
+        if genre:
+            dialog.preset_genre(genre)
+        if reference is not None:
+            dialog.set_reference(reference)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         request = dialog.to_request()

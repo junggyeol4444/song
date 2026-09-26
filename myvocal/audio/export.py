@@ -245,7 +245,10 @@ def export_midi(project: Project, path: str | Path) -> Path:
             events.append((note.end_tick, 0, note.midi, 0))
             if note.lyric:
                 events.append((note.start_tick, 2, 0, 0))
-        lyrics = {n.start_tick: n.lyric for n in track.notes if n.lyric}
+        # 낱말 끝 음절 뒤에는 띄어쓰기를 붙인다 (노래방 MIDI 의 관례). 다시 읽을 때
+        # 이걸 보고 띄어쓰기를 되살린다.
+        lyrics = {n.start_tick: n.lyric + (" " if n.word_end else "")
+                  for n in track.notes if n.lyric}
         # 같은 시각이면 끄는 것을 먼저 한다. 안 그러면 같은 음이 겹쳐 꺼진다.
         events.sort(key=lambda e: (e[0], e[1]))
 
@@ -312,6 +315,7 @@ def import_midi(path: str | Path, title: str = "") -> Project:
         name = ""
         open_notes: dict[tuple[int, int], tuple[int, int]] = {}
         collected: list[Note] = []
+        lyric_at: dict[int, str] = {}
         is_drum = False
         program = 0
 
@@ -329,6 +333,8 @@ def import_midi(path: str | Path, title: str = "") -> Project:
                     signature = None
             elif message.type == "program_change":
                 program = message.program
+            elif message.type == "lyrics" and message.text.strip():
+                lyric_at[tick] = message.text
             elif message.type == "note_on" and message.velocity > 0:
                 if message.channel == 9:
                     is_drum = True
@@ -344,11 +350,19 @@ def import_midi(path: str | Path, title: str = "") -> Project:
 
         if not collected:
             continue
-        instrument = "drum_kit" if is_drum else _instrument_from_program(program)
-        new_track = project.add_track(
-            name or f"트랙 {track_index}", "drum" if is_drum else "instrument",
-            instrument=instrument,
-        )
+        # 가사를 그 시각에 시작하는 음에 붙인다. 가사가 있는 트랙은 보컬 트랙이다.
+        with_lyrics = 0
+        if lyric_at and not is_drum:
+            for index, note in enumerate(collected):
+                text = lyric_at.get(note.start_tick)
+                if text:
+                    collected[index] = note.with_lyric(text.strip(), word_end=text.endswith(" "))
+                    with_lyrics += 1
+        is_vocal = with_lyrics > 0
+        instrument = "drum_kit" if is_drum else ("choir" if is_vocal
+                                                 else _instrument_from_program(program))
+        kind = "drum" if is_drum else ("vocal" if is_vocal else "instrument")
+        new_track = project.add_track(name or f"트랙 {track_index}", kind, instrument=instrument)
         new_track.add_notes(collected)
 
     if tempo_changes:

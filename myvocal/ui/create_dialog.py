@@ -18,8 +18,9 @@ from dataclasses import dataclass
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..music.genre import GENRES, GenreBlend, available_genres, get_genre
+from ..music.genre import GENRES, GenreBlend, available_genres, get_genre, user_genres
 from ..music.melody import VocalRange
+from ..music.structure import SongStructure
 from ..music.theory import Key
 from ..voice.model import SINGING_STYLES
 from .theme import DARK, Palette
@@ -65,8 +66,12 @@ class GenreMixRow(QtWidgets.QWidget):
         layout.setSpacing(8)
 
         self.genre_box = QtWidgets.QComboBox()
+        for name in user_genres():           # 내 스타일이 먼저
+            self.genre_box.addItem(GENRES[name].display_name, name)
         for name in available_genres():
             self.genre_box.addItem(GENRES[name].display_name, name)
+        if genre in GENRES and self.genre_box.findData(genre) < 0:
+            self.genre_box.addItem(GENRES[genre].display_name, genre)   # Reference 임시 장르
         index = self.genre_box.findData(genre)
         if index >= 0:
             self.genre_box.setCurrentIndex(index)
@@ -214,6 +219,13 @@ class CreateSongDialog(QtWidgets.QDialog):
 
         layout.addLayout(form)
 
+        self.reference = None
+        self.reference_label = QtWidgets.QLabel()
+        self.reference_label.setObjectName("Dim")
+        self.reference_label.setWordWrap(True)
+        self.reference_label.setVisible(False)
+        layout.addWidget(self.reference_label)
+
         # --- 무엇을 만들지 ---
         options = QtWidgets.QGroupBox("만들 것")
         options_layout = QtWidgets.QGridLayout(options)
@@ -301,6 +313,27 @@ class CreateSongDialog(QtWidgets.QDialog):
             f"{blend}  ·  BPM {profile.bpm_low:.0f}~{profile.bpm_high:.0f}"
         )
 
+    def preset_genre(self, name: str) -> None:
+        """장르를 하나로 정해 둔다 (내 스타일로 만들기, Reference 로 만들기)."""
+        while len(self._genre_rows) > 1:
+            self._remove_genre_row(self._genre_rows[-1])
+        row = self._genre_rows[0]
+        row.setParent(None)
+        row.deleteLater()
+        self._genre_rows.clear()
+        self._add_genre_row(name, 100)
+        self._touched = True        # 설명을 읽어 장르를 바꾸지 않게
+
+    def set_reference(self, hints) -> None:
+        """9번: 참고 곡의 템포·구조·성향으로 새 곡을 만든다."""
+        self.reference = hints
+        self.preset_genre(hints.genre_name)
+        if hints.bpm:
+            self.bpm_auto.setChecked(False)
+            self.bpm_box.setValue(int(round(hints.bpm)))
+        self.reference_label.setText(hints.describe())
+        self.reference_label.setVisible(True)
+
     def genre_blend(self) -> GenreBlend:
         weights: dict[str, float] = {}
         for row in self._genre_rows:
@@ -386,6 +419,10 @@ class CreateSongDialog(QtWidgets.QDialog):
             voice_model=self.voice_box.currentData(),
             singing_style=self.style_box.currentData(),
             seed=seed,
+            # 곡마다 새 구조로 (작곡기가 구간에 지시를 적으므로 같은 것을 두 곡이 나눠 쓰면 안 된다)
+            structure=(SongStructure.from_list(self.reference.structure.to_list())
+                       if self.reference is not None and self.reference.structure is not None
+                       else None),
         )
 
     def wants(self, key: str) -> bool:

@@ -605,6 +605,72 @@ finally:
     _library_module.voices_folder = _original
 studio.close()
 
+print("[18] AI 학습실")
+from myvocal.audio.export import export_midi as _export_midi
+from myvocal.learning.library import MusicLibrary
+from myvocal.ui.learning_studio import LearningStudio
+
+music_folder = Path(tempfile.mkdtemp())
+midi_files = []
+for seed in (1, 2):
+    source = Composer(SongRequest(genre="jazz", seed=seed)).compose()
+    midi_path = music_folder / f"jazz{seed}.mid"
+    _export_midi(source, midi_path)
+    midi_files.append(midi_path)
+learning = LearningStudio(MusicLibrary(music_folder / "library"))
+learning.resize(1100, 720)
+learning.show()
+application.processEvents()
+
+
+def wait_learning():
+    deadline = _time.time() + 120
+    while learning._job is not None and _time.time() < deadline:
+        application.processEvents()
+        _time.sleep(0.01)
+    application.processEvents()
+
+
+learning.add_file(str(midi_files[0]), "own")
+wait_learning()
+learning.add_file(str(midi_files[1]), "reference")
+wait_learning()
+check("곡 두 개", learning.item_list.count(), 2)
+check_true("분석 결과가 보인다", "BPM" in learning.report_view.toPlainText())
+first_item = learning.item_list.item(0)
+check("내 곡은 체크할 수 있다", first_item.checkState(), QtCore.Qt.CheckState.Checked)
+check_true("Reference 곡은 체크할 수 없다",
+           not (learning.item_list.item(1).flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable))
+learning.build_style("시험 스타일")
+wait_learning()
+check("스타일이 생겼다", learning.style_list.count(), 1)
+genre_signals, reference_signals = [], []
+learning.create_with_genre.connect(genre_signals.append)
+learning.create_with_reference.connect(reference_signals.append)
+learning.style_list.setCurrentRow(0)
+learning.use_style()
+check_true("이 스타일로 새 곡 신호", len(genre_signals) == 1 and genre_signals[0].startswith("mystyle"))
+learning.item_list.setCurrentRow(1)
+learning.use_reference()
+check("Reference 로 새 곡 신호", len(reference_signals), 1)
+learning.grab().save(str(Path(tempfile.gettempdir()) / "learning_studio_test.png"))
+
+dialog = CreateSongDialog()
+dialog.preset_genre(genre_signals[0])
+check("내 스타일이 장르로 들어간다", list(dialog.genre_blend().weights), [genre_signals[0]])
+hints = reference_signals[0]
+dialog2 = CreateSongDialog()
+dialog2.set_reference(hints)
+request2 = dialog2.to_request()
+check("Reference 임시 장르", list(request2.genre.weights), [hints.genre_name])
+check("Reference 템포", request2.bpm, float(round(hints.bpm)))
+if hints.structure is not None:
+    check_true("Reference 구조 (복사본)", request2.structure is not hints.structure
+               and request2.structure.to_list() == hints.structure.to_list())
+check_true("Reference 안내가 보인다", dialog2.reference_label.isVisibleTo(dialog2)
+           and "가져오지 않은 것" in dialog2.reference_label.text())
+learning.close()
+
 print("\n" + "=" * 62)
 print(f"검증 항목 {checks}개")
 if failures:

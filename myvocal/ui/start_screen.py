@@ -69,9 +69,7 @@ MENU: tuple[MenuEntry, ...] = (
     ),
     MenuEntry(
         "learning", "📚", "AI 학습실",
-        "내 음악, 내 목소리, 내 캐릭터를 학습시켜 스타일을 만듭니다.",
-        available=False,
-        unavailable_reason="학습실은 아직 만들고 있습니다.",
+        "내 음악을 분석해 '내 스타일' 을 만들고, 참고 곡(Reference)으로 새 곡을 만듭니다.",
     ),
     MenuEntry(
         "open", "📂", "프로젝트 열기",

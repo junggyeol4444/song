@@ -296,6 +296,10 @@ def get_genre(name: str) -> GenreProfile:
         "하우스": "house", "테크노": "techno", "앰비언트": "ambient",
     }
     normalized = aliases.get(name.strip().lower(), aliases.get(key, key))
+    if normalized not in GENRES and normalized.startswith("mystyle"):
+        # 내 스타일(8번)은 사용자 폴더에 있다. 저장된 곡을 열 때 여기서 불러온다.
+        from ..learning.library import load_style_genre
+        load_style_genre(normalized)
     if normalized not in GENRES:
         raise GenreError(
             f"모르는 장르입니다: {name!r}\n"
@@ -304,8 +308,18 @@ def get_genre(name: str) -> GenreProfile:
     return GENRES[normalized]
 
 
+USER_GENRE_PREFIXES = ("mystyle", "reference")
+
+
 def available_genres() -> list[str]:
-    return sorted(GENRES)
+    """기본 장르 (3번 문서의 22개). 사용자가 만든 스타일은 user_genres()."""
+    return sorted(n for n in GENRES if not n.startswith(USER_GENRE_PREFIXES))
+
+
+def user_genres() -> list[str]:
+    """학습실에서 만든 '내 스타일' 장르들 (8번). Reference 임시 장르는 빼고."""
+    return sorted((n for n in GENRES if n.startswith("mystyle")),
+                  key=lambda n: GENRES[n].display_name)
 
 
 @dataclass(frozen=True, slots=True)
